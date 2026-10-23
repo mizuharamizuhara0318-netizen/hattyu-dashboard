@@ -17,7 +17,7 @@ st.markdown("""
 BASE_DIR = "/content/drive/MyDrive/発注検討"
 
 # 正しいファイル名に対応（メイン検討表は 発注検討表-修正.xlsx、弥生データは 弥生確保リスト.xlsx）
-MAIN_EXCEL = os.path.join(BASE_DIR, "発注検討表-修正.xlsx")
+MAIN_EXCEL = os.path.join(BASE_DIR, "発注検討表.xlsx")
 if not os.path.exists(MAIN_EXCEL):
     MAIN_EXCEL = os.path.join(BASE_DIR, "発注検討表.xlsx") # フォールバック
 
