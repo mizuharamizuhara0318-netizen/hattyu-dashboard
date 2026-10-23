@@ -14,12 +14,16 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-BASE_DIR = "/content/drive/MyDrive/発注検討"
+# 🌐 Streamlit Cloud（同じフォルダ内）とGoogle Colabの両方に対応するパス設定
+if os.path.exists("/content/drive/MyDrive/発注検討"):
+    BASE_DIR = "/content/drive/MyDrive/発注検討"
+else:
+    BASE_DIR = "."
 
-# 正しいファイル名に対応（メイン検討表は 発注検討表.xlsx、弥生データは 弥生確保リスト.xlsx）
+# メインファイルは「発注検討表.xlsx」または「発注検討表-修正.xlsx」のどちらにも自動対応
 MAIN_EXCEL = os.path.join(BASE_DIR, "発注検討表.xlsx")
 if not os.path.exists(MAIN_EXCEL):
-    MAIN_EXCEL = os.path.join(BASE_DIR, "発注検討表.xlsx") # フォールバック
+    MAIN_EXCEL = os.path.join(BASE_DIR, "発注検討表-修正.xlsx")
 
 YAYOI_EXCEL = os.path.join(BASE_DIR, "弥生確保リスト.xlsx")
 SAVE_CSV = os.path.join(BASE_DIR, "meeting_decisions_v8.csv")
@@ -82,7 +86,6 @@ def load_excel_master(file_path):
     ws = wb[target_sheet]
     rows = safe_get_rows(ws)
     
-    # 80828等から前回決定事項を取得
     dec_80828 = {}
     prev_80828 = {}
     if "80828" in wb.sheetnames:
@@ -137,7 +140,6 @@ def load_excel_master(file_path):
         })
     df_main = pd.DataFrame(items)
 
-    # 過去28回の会議シートから決定事項履歴を抽出
     date_sheets = [s for s in wb.sheetnames if s.isdigit() and len(s) == 5]
     hist_list = []
     for s in date_sheets:
@@ -163,7 +165,7 @@ df_yayoi = load_yayoi_data(YAYOI_EXCEL)
 df_main, df_hist = load_excel_master(MAIN_EXCEL)
 
 if df_main.empty:
-    st.error("⚠️ メインの『発注検討表』ファイルが見つかりません。")
+    st.error(f"⚠️ メインの『発注検討表』ファイルが見つかりません。(探索パス: {MAIN_EXCEL})")
     st.stop()
 
 if not df_yayoi.empty:
