@@ -208,6 +208,38 @@ tab1, tab2, tab3 = st.tabs([
     "🕒 3. 入荷予定・過去の発注決定履歴"
 ])
 
+# ポップアップ（ダイアログ）の定義
+@st.dialog("📦 品番別 詳細データ確認ポップアップ", width="large")
+def show_detail_dialog(sel_code):
+    st.markdown(f"### 品番: **{sel_code}** の詳細情報")
+    
+    # 該当品番の基本データ
+    match_row = m_df[m_df["品番"] == sel_code]
+    if not match_row.empty:
+        r_info = match_row.iloc[0]
+        st.info(f"**商品区分**: {r_info['商品区分']} ｜ **在庫数**: {r_info['在庫数_ロジザード']:,} ｜ **確保数**: {r_info['確保数_ロジザード']:,} ｜ **発注検討**: {r_info['発注検討フラグ']:,}")
+
+    col_l, col_r = st.columns(2)
+    with col_l:
+        st.markdown("#### 🏢 弥生確保内訳（どの会社が何個）")
+        if not df_yayoi.empty:
+            sub_y = df_yayoi[df_yayoi["商品コード"] == sel_code].copy()
+            if not sub_y.empty:
+                st.dataframe(sub_y[["得意先名", "受注残数", "受注日", "納入期日", "備考"]], hide_index=True, use_container_width=True)
+            else:
+                st.write("弥生確保の明細はありません。")
+    with col_r:
+        st.markdown("#### 📜 過去の会議決定履歴")
+        if not df_hist.empty:
+            sub_h = df_hist[df_hist["品番"] == sel_code].sort_values("会議日", ascending=False)
+            if not sub_h.empty:
+                st.dataframe(sub_h[["会議日", "決定事項"]], hide_index=True, use_container_width=True)
+            else:
+                st.write("過去の履歴はありません。")
+    
+    if st.button("閉じる"):
+        st.rerun()
+
 with tab1:
     f_col1, f_col2, f_col3 = st.columns([2, 2, 3])
     filter_mode = f_col1.selectbox(
@@ -274,7 +306,7 @@ with tab1:
         disabled=[c for c in excel_cols if c not in ("入荷予定日_ロジザード", "決定事項", "発注日")],
         hide_index=True,
         use_container_width=True,
-        height=550
+        height=450
     )
 
     if st.button("💾 編集した内容を保存する", type="primary"):
@@ -287,47 +319,25 @@ with tab1:
         st.session_state.master_df[["品番", "入荷予定日_ロジザード", "決定事項", "発注日"]].to_csv(SAVE_CSV, index=False, encoding="utf-8-sig")
         st.success("✅ 保存しました！")
 
-    down_col1, _ = st.columns([2, 4])
-    csv_data = m_df[excel_cols].to_csv(index=False, encoding="utf-8-sig")
-    down_col1.download_button(
-        label="📥 現在の発注検討表（入力内容含む）をCSVダウンロード",
-        data=csv_data,
-        file_name=f"発注検討表_出力_{datetime.date.today()}.csv",
-        mime="text/csv",
-        type="secondary"
-    )
-
     st.divider()
 
-    st.subheader("🔎 品番別 詳細ドリルダウン（どの会社が何個確保しているか・過去履歴）")
+    # ★ 品番を選んで「詳細ポップアップを開く」ボタンを配置
+    st.subheader("🔎 品番を選んで詳細を確認（ポップアップ表示）")
     all_codes = v_df["品番"].tolist() if not v_df.empty else m_df["品番"].tolist()
     
-    sel_code = st.selectbox(
-        "📌 確認・入力する【品番】を選択してください",
-        options=all_codes,
-        format_func=lambda x: f"{x} ｜ {m_df.loc[m_df['品番']==x, '商品区分'].values[0]} （在庫:{m_df.loc[m_df['品番']==x, '在庫数_ロジザード'].values[0]:,} / 確保:{m_df.loc[m_df['品番']==x, '確保数_ロジザード'].values[0]:,} / 発注検討:{m_df.loc[m_df['品番']==x, '発注検討フラグ'].values[0]:,}）"
-    )
-
-    if sel_code:
-        row_info = m_df[m_df["品番"] == sel_code].iloc[0]
-        col_left, col_right = st.columns([3, 2])
-        with col_left:
-            st.markdown(f"#### 🏢 『{sel_code}』の得意先別・弥生確保内訳")
-            if not df_yayoi.empty:
-                sub_y = df_yayoi[df_yayoi["商品コード"] == sel_code].copy()
-                if not sub_y.empty:
-                    sub_y = sub_y.fillna("")
-                    st.dataframe(sub_y[["得意先名", "受注残数", "数量", "受注日", "納入期日", "倉庫名", "備考", "担当者名"]], hide_index=True, use_container_width=True)
-                else:
-                    st.info(f"『{sel_code}』の弥生確保明細はありません。")
-        with col_right:
-            st.markdown(f"#### 📜 『{sel_code}』の過去決定履歴")
-            if not df_hist.empty:
-                sub_h = df_hist[df_hist["品番"] == sel_code].sort_values("会議日", ascending=False)
-                if not sub_h.empty:
-                    st.dataframe(sub_h[["会議日", "決定事項"]], hide_index=True, use_container_width=True)
-                else:
-                    st.caption("過去の会議決定履歴なし")
+    p_col1, p_col2 = st.columns([3, 1])
+    with p_col1:
+        sel_code = st.selectbox(
+            "📌 ポップアップで確認する【品番】を選択",
+            options=all_codes,
+            format_func=lambda x: f"{x} ｜ {m_df.loc[m_df['品番']==x, '商品区分'].values[0]} （在庫:{m_df.loc[m_df['品番']==x, '在庫数_ロジザード'].values[0]:,} / 確保:{m_df.loc[m_df['品番']==x, '確保数_ロジザード'].values[0]:,}）",
+            key="popup_select_code"
+        )
+    with p_col2:
+        st.write("")
+        st.write("")
+        if st.button("📦 詳細をポップアップ表示", type="secondary"):
+            show_detail_dialog(sel_code)
 
 with tab2:
     st.subheader("🏢 会社（得意先）別 確保・注文検索 ＆ 月別納期スケジュール")
