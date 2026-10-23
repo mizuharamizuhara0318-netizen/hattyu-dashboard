@@ -9,9 +9,18 @@ st.set_page_config(page_title="発注検討表（Web管理版）", layout="wide"
 st.markdown("""
 <style>
     .block-container { padding-top: 1rem; padding-bottom: 2rem; max-width: 100% !important; }
-    th { background-color: #f2f2f2 !important; color: #000 !important; font-weight: bold !important; border: 1px solid #ccc !important; white-space: normal !important; text-align: center !important; }
+    /* ヘッダーの文字折り返しと高さを最適化 */
+    th { 
+        background-color: #f2f2f2 !important; 
+        color: #000 !important; 
+        font-weight: bold !important; 
+        border: 1px solid #ccc !important; 
+        white-space: pre-wrap !important; 
+        text-align: center !important; 
+        vertical-align: middle !important;
+        line-height: 1.2 !important;
+    }
     td { border: 1px solid #ccc !important; font-family: "Meiryo", sans-serif; font-size: 13px; }
-    /* テーブル全体の表示を最適化 */
     div[data-testid="stDataEditor"] { width: 100% !important; }
 </style>
 """, unsafe_allow_html=True)
@@ -245,27 +254,27 @@ with tab1:
     ]
     excel_cols = list(dict.fromkeys(excel_cols))
 
-    # 数字列の幅を統一し、カンマ区切り（format="%d"）を設定
+    # ヘッダーを改行してExcelのレイアウトに合わせ、数値幅とカンマ区切りを統一
     edited_df = st.data_editor(
         v_df[excel_cols],
         column_config={
             "No": st.column_config.NumberColumn("No", width="small", format="%d"),
-            "商品センター": st.column_config.TextColumn("商品センター", width="small"),
+            "商品センター": st.column_config.TextColumn("商品\nセンター", width="small"),
             "品番": st.column_config.TextColumn("品番", width="medium"),
             "商品区分": st.column_config.TextColumn("商品区分", width="large"),
-            "1課発注点": st.column_config.NumberColumn("1課発注点", width="small", format="%d"),
-            "2課発注点": st.column_config.TextColumn("2課発注点", width="small"),
-            "在庫数_ロジザード": st.column_config.NumberColumn("在庫数 ロジザード", width="small", format="%d"),
-            "入荷予定数_ロジザード": st.column_config.NumberColumn("入荷予定数 ロジザード", width="small", format="%d"),
-            "入荷予定日_ロジザード": st.column_config.TextColumn("📝入荷予定日", width="medium"),
-            "確保数_ロジザード": st.column_config.NumberColumn("確保数 ロジザード", width="small", format="%d"),
-            "在庫確保_弥生": st.column_config.NumberColumn("在庫確保 弥生", width="small", format="%d"),
-            "在庫確保_丸藤": st.column_config.NumberColumn("在庫確保 丸藤", width="small", format="%d"),
-            "確保数のズレ": st.column_config.NumberColumn("確保数のズレ", width="small", format="%d"),
-            "入荷後のフリー在庫": st.column_config.NumberColumn("入荷後 フリー在庫", width="small", format="%d"),
-            "発注検討フラグ": st.column_config.NumberColumn("発注検討フラグ", width="small", format="%d"),
-            "在庫回転率": st.column_config.NumberColumn("在庫回転率(%)", width="small", format="%d%%"),
-            "リンベル確保数": st.column_config.TextColumn("リンベル確保数", width="small"),
+            "1課発注点": st.column_config.NumberColumn("1課発注\n点", width="small", format="%d"),
+            "2課発注点": st.column_config.NumberColumn("2課発注\n点", width="small"),
+            "在庫数_ロジザード": st.column_config.NumberColumn("在庫数\nロジザード", width="small", format="%d"),
+            "入荷予定数_ロジザード": st.column_config.NumberColumn("入荷予定数\nロジザード", width="small", format="%d"),
+            "入荷予定日_ロジザード": st.column_config.TextColumn("📝入荷予定日\nロジザード", width="medium"),
+            "確保数_ロジザード": st.column_config.NumberColumn("確保数\nロジザード\n(在庫確保)", width="small", format="%d"),
+            "在庫確保_弥生": st.column_config.NumberColumn("在庫確保\n(弥生)", width="small", format="%d"),
+            "在庫確保_丸藤": st.column_config.NumberColumn("在庫確保\n(丸藤)", width="small", format="%d"),
+            "確保数のズレ": st.column_config.NumberColumn("確保数の\nズレ", width="small", format="%d"),
+            "入荷後のフリー在庫": st.column_config.NumberColumn("入荷後の\nフリー在庫", width="small", format="%d"),
+            "発注検討フラグ": st.column_config.NumberColumn("発注検討\nフラグ", width="small", format="%d"),
+            "在庫回転率": st.column_config.NumberColumn("在庫回転率\n(%)", width="small", format="%d%%"),
+            "リンベル確保数": st.column_config.TextColumn("リンベル\n確保数", width="small"),
             "決定事項": st.column_config.TextColumn("📝決定事項", width="large"),
             "発注日": st.column_config.TextColumn("📝発注日", width="small"),
         },
@@ -356,7 +365,7 @@ with tab2:
                 yv_merged["納入月"] = pd.to_datetime(valid_dates, errors="coerce").dt.strftime("%Y年%m月")
                 monthly_sch = yv_merged[yv_merged["納入月"].notna()].groupby("納入月")["受注残数"].sum()
                 if not monthly_sch.empty:
-                    st.markdown("##### 📈 選択した会社のゲージ・月別 納入スケジュール（受注残数合計）")
+                    st.markdown("##### 📈 選択した会社の月別 納入スケジュール（受注残数合計）")
                     st.bar_chart(monthly_sch)
 
         st.dataframe(yv_merged[["得意先名", "商品コード", "商品名/摘要", "受注残数", "受注日", "納入期日", "備考", "倉庫名", "入荷予定日_ロジザード", "決定事項"]], hide_index=True, use_container_width=True, height=400)
