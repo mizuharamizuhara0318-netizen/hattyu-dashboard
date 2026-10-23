@@ -9,7 +9,6 @@ st.set_page_config(page_title="発注検討表（Web管理版）", layout="wide"
 st.markdown("""
 <style>
     .block-container { padding-top: 1rem; padding-bottom: 2rem; max-width: 100% !important; }
-    /* ヘッダーの文字折り返しと高さを最適化 */
     th { 
         background-color: #f2f2f2 !important; 
         color: #000 !important; 
@@ -118,14 +117,15 @@ def load_excel_master(file_path):
             curr_dec = dec_80828[hinban]
             
         ndate = clean_str(r[18]) if len(r) > 18 else ""
+        v_2ka = clean_str(r[15]) if len(r) > 15 and not is_na_val(r[15]) else ""
 
         items.append({
-            "No": clean_str(r[0]),
+            "No": int(to_num(r[0])) if not is_na_val(r[0]) else 0,
             "商品センター": clean_str(r[1]),
             "品番": hinban,
             "商品区分": clean_str(r[3]),
             "1課発注点": int(round(to_num(r[14]), 0)),
-            "2課発注点": clean_str(r[15]),
+            "2課発注点": v_2ka,
             "在庫数_ロジザード": int(to_num(r[16])),
             "入荷予定数_ロジザード": int(to_num(r[17])),
             "入荷予定日_ロジザード": ndate,
@@ -139,12 +139,6 @@ def load_excel_master(file_path):
             "リンベル確保数": clean_str(r[27]) if len(r) > 27 else "",
             "決定事項": curr_dec,
             "発注日": "",
-            "72期": int(to_num(r[5])),
-            "73期": int(to_num(r[6])),
-            "74期": int(to_num(r[7])),
-            "75期": int(to_num(r[9])),
-            "76期": int(to_num(r[10])),
-            "77期": int(to_num(r[11])),
             "NA行": na_flag
         })
     df_main = pd.DataFrame(items)
@@ -254,7 +248,6 @@ with tab1:
     ]
     excel_cols = list(dict.fromkeys(excel_cols))
 
-    # ヘッダーを改行してExcelのレイアウトに合わせ、数値幅とカンマ区切りを統一
     edited_df = st.data_editor(
         v_df[excel_cols],
         column_config={
@@ -263,7 +256,7 @@ with tab1:
             "品番": st.column_config.TextColumn("品番", width="medium"),
             "商品区分": st.column_config.TextColumn("商品区分", width="large"),
             "1課発注点": st.column_config.NumberColumn("1課発注\n点", width="small", format="%d"),
-            "2課発注点": st.column_config.NumberColumn("2課発注\n点", width="small"),
+            "2課発注点": st.column_config.TextColumn("2課発注\n点", width="small"),
             "在庫数_ロジザード": st.column_config.NumberColumn("在庫数\nロジザード", width="small", format="%d"),
             "入荷予定数_ロジザード": st.column_config.NumberColumn("入荷予定数\nロジザード", width="small", format="%d"),
             "入荷予定日_ロジザード": st.column_config.TextColumn("📝入荷予定日\nロジザード", width="medium"),
