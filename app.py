@@ -9,18 +9,18 @@ st.set_page_config(page_title="発注検討表（Web管理版）", layout="wide"
 st.markdown("""
 <style>
     .block-container { padding-top: 1rem; padding-bottom: 2rem; max-width: 100% !important; }
-    th { background-color: #f2f2f2 !important; color: #000 !important; font-weight: bold !important; border: 1px solid #ccc !important; }
+    th { background-color: #f2f2f2 !important; color: #000 !important; font-weight: bold !important; border: 1px solid #ccc !important; white-space: normal !important; text-align: center !important; }
     td { border: 1px solid #ccc !important; font-family: "Meiryo", sans-serif; font-size: 13px; }
+    /* テーブル全体の表示を最適化 */
+    div[data-testid="stDataEditor"] { width: 100% !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# 🌐 Streamlit Cloud（同じフォルダ内）とGoogle Colabの両方に対応するパス設定
 if os.path.exists("/content/drive/MyDrive/発注検討"):
     BASE_DIR = "/content/drive/MyDrive/発注検討"
 else:
     BASE_DIR = "."
 
-# メインファイルは「発注検討表.xlsx」または「発注検討表-修正.xlsx」のどちらにも自動対応
 MAIN_EXCEL = os.path.join(BASE_DIR, "発注検討表.xlsx")
 if not os.path.exists(MAIN_EXCEL):
     MAIN_EXCEL = os.path.join(BASE_DIR, "発注検討表-修正.xlsx")
@@ -245,19 +245,34 @@ with tab1:
     ]
     excel_cols = list(dict.fromkeys(excel_cols))
 
+    # 数字列の幅を統一し、カンマ区切り（format="%d"）を設定
     edited_df = st.data_editor(
         v_df[excel_cols],
         column_config={
+            "No": st.column_config.NumberColumn("No", width="small", format="%d"),
+            "商品センター": st.column_config.TextColumn("商品センター", width="small"),
+            "品番": st.column_config.TextColumn("品番", width="medium"),
+            "商品区分": st.column_config.TextColumn("商品区分", width="large"),
+            "1課発注点": st.column_config.NumberColumn("1課発注点", width="small", format="%d"),
+            "2課発注点": st.column_config.TextColumn("2課発注点", width="small"),
+            "在庫数_ロジザード": st.column_config.NumberColumn("在庫数 ロジザード", width="small", format="%d"),
+            "入荷予定数_ロジザード": st.column_config.NumberColumn("入荷予定数 ロジザード", width="small", format="%d"),
             "入荷予定日_ロジザード": st.column_config.TextColumn("📝入荷予定日", width="medium"),
+            "確保数_ロジザード": st.column_config.NumberColumn("確保数 ロジザード", width="small", format="%d"),
+            "在庫確保_弥生": st.column_config.NumberColumn("在庫確保 弥生", width="small", format="%d"),
+            "在庫確保_丸藤": st.column_config.NumberColumn("在庫確保 丸藤", width="small", format="%d"),
+            "確保数のズレ": st.column_config.NumberColumn("確保数のズレ", width="small", format="%d"),
+            "入荷後のフリー在庫": st.column_config.NumberColumn("入荷後 フリー在庫", width="small", format="%d"),
+            "発注検討フラグ": st.column_config.NumberColumn("発注検討フラグ", width="small", format="%d"),
+            "在庫回転率": st.column_config.NumberColumn("在庫回転率(%)", width="small", format="%d%%"),
+            "リンベル確保数": st.column_config.TextColumn("リンベル確保数", width="small"),
             "決定事項": st.column_config.TextColumn("📝決定事項", width="large"),
             "発注日": st.column_config.TextColumn("📝発注日", width="small"),
-            "発注検討フラグ": st.column_config.NumberColumn("発注検討フラグ", format="%d"),
-            "在庫回転率": st.column_config.NumberColumn("在庫回転率(%)", format="%d%%"),
         },
         disabled=[c for c in excel_cols if c not in ("入荷予定日_ロジザード", "決定事項", "発注日")],
         hide_index=True,
         use_container_width=True,
-        height=500
+        height=550
     )
 
     if st.button("💾 編集した内容を保存する", type="primary"):
@@ -341,7 +356,7 @@ with tab2:
                 yv_merged["納入月"] = pd.to_datetime(valid_dates, errors="coerce").dt.strftime("%Y年%m月")
                 monthly_sch = yv_merged[yv_merged["納入月"].notna()].groupby("納入月")["受注残数"].sum()
                 if not monthly_sch.empty:
-                    st.markdown("##### 📈 選択した会社の「月別 納入スケジュール（受注残数合計）」")
+                    st.markdown("##### 📈 選択した会社のゲージ・月別 納入スケジュール（受注残数合計）")
                     st.bar_chart(monthly_sch)
 
         st.dataframe(yv_merged[["得意先名", "商品コード", "商品名/摘要", "受注残数", "受注日", "納入期日", "備考", "倉庫名", "入荷予定日_ロジザード", "決定事項"]], hide_index=True, use_container_width=True, height=400)
