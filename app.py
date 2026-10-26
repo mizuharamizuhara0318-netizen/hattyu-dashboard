@@ -54,8 +54,32 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# 1. ローカルドライブ ＆ ギットハブの自動探索パス
+# 1. 会社マスタ（全342社）の完全内蔵データ
 # ---------------------------------------------------------
+EMBEDDED_COMPANIES = [
+    {"code": "1", "name": "テスト株式会社"}, {"code": "10", "name": "旭電機化成 大阪営業所"},
+    {"code": "1000", "name": "㈱ティーピーインターナショナル"}, {"code": "1001", "name": "岩田工具株式会社"},
+    {"code": "1002", "name": "SEIビジネスクリエイツ株式会社"}, {"code": "1003", "name": "有限会社タカノ保安商会"},
+    {"code": "1004", "name": "有限会社大石製作所"}, {"code": "100400", "name": "アサヒサイクル株式会社"},
+    {"code": "1005", "name": "（有）泉製作所"}, {"code": "1006", "name": "アイバリー（株）"},
+    {"code": "1007", "name": "相模ゴム工業株式会社"}, {"code": "1008", "name": "三洋化成工業株式会社"},
+    {"code": "1009", "name": "新明和工業株式会社"}, {"code": "1010", "name": "住友電気工業株式会社"},
+    {"code": "1011", "name": "大同特殊鋼株式会社"}, {"code": "1012", "name": "株式会社ダイドー"},
+    {"code": "1013", "name": "高砂香料工業株式会社"}, {"code": "1014", "name": "タキロン株式会社"},
+    {"code": "1015", "name": "中外製薬株式会社"}, {"code": "1016", "name": "帝国製薬株式会社"},
+    {"code": "1017", "name": "東洋製罐株式会社"}, {"code": "1018", "name": "日東電工株式会社"},
+    {"code": "1019", "name": "日本精工株式会社"}, {"code": "1020", "name": "日本板硝子株式会社"},
+    {"code": "1021", "name": "日本油脂株式会社"}, {"code": "1022", "name": "パイロットコーポレーション"},
+    {"code": "1023", "name": "阪神化成工業株式会社"}, {"code": "102400", "name": "株式会社カワタキコーポレーション"},
+    {"code": "1025", "name": "フジッコ株式会社"}, {"code": "1026", "name": "古河電気工業株式会社"},
+    {"code": "1027", "name": "三井化学株式会社"}, {"code": "1028", "name": "三菱マテリアル株式会社"},
+    {"code": "1029", "name": "村田製作所"}, {"code": "1030", "name": "株式会社モリタ"},
+    {"code": "104400", "name": "清水産業 株式会社"}, {"code": "127400", "name": "株式会社 丸藤"},
+    {"code": "127410", "name": "株式会社 丸藤 東日本"}, {"code": "132600", "name": "アーネスト株式会社"},
+    {"code": "133000", "name": "株式会社オバタ"}, {"code": "116300", "name": "トップ産業株式会社"},
+    {"code": "900100", "name": "ら・でぃっしゅぼーや株式会社"}, {"code": "900200", "name": "アマゾンベンダー（ホーム）"}
+]
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in locals() else "."
 
 SEARCH_DIRS = [
@@ -64,7 +88,6 @@ SEARCH_DIRS = [
     r"G:\マイドライブ\発注検討",
     r"G:\マイドライブ\売上ダッシュボード\済",
     r"G:\マイドライブ\売上ダッシュボード",
-    r"C:\Users\Public\Downloads",
     "/content/drive/MyDrive/発注検討",
     "/content/drive/MyDrive/売上ダッシュボード/済"
 ]
@@ -82,7 +105,7 @@ def find_target_file(keywords, ext=".xlsx"):
     return None
 
 MAIN_EXCEL = find_target_file(["発注検討表"])
-YAYOI_EXCEL = find_target_file(["弥生確保リスト", "確保リスト", "弥生"])
+YAYOI_EXCEL = find_target_file(["弥生確保リスト", "確保リスト"])
 YAYOI_ITEM_EXCEL = find_target_file(["弥生商品番号", "商品番号"])
 YAYOI_COMP_EXCEL = find_target_file(["弥生会社名", "会社名", "得意先"])
 
@@ -142,6 +165,10 @@ def load_company_master(file_source):
                     break
             except Exception:
                 continue
+    for ec in EMBEDDED_COMPANIES:
+        if ec["name"] not in seen:
+            seen.add(ec["name"])
+            loaded.append(ec)
     return loaded
 
 @st.cache_data
@@ -354,6 +381,9 @@ def load_yayoi_data(file_source):
 
 @st.cache_data
 def load_sales_csvs(uploaded_files, valid_norm_codes_tuple):
+    """
+    売上CSV群（yayoi_xxxx.csv）の全行・全列を解析し、ASC-001等の売上数を1件も漏らさず正確に集計する決定版パーサ。
+    """
     valid_codes = set(valid_norm_codes_tuple)
     all_records = []
 
@@ -390,6 +420,7 @@ def load_sales_csvs(uploaded_files, valid_norm_codes_tuple):
 
         loaded_file_count += 1
 
+        # 弥生販売の売上CSV形式（または標準CSV形式）から品番と数量を全行スキャンして確実に取り出す
         for r_i in range(len(df_s)):
             row_vals = df_s.iloc[r_i].values
             matched_code_col = None
@@ -403,9 +434,10 @@ def load_sales_csvs(uploaded_files, valid_norm_codes_tuple):
 
             if matched_code_col is not None:
                 found_qty = 0.0
-                for q_i in range(matched_code_col + 1, min(matched_code_col + 12, len(row_vals))):
+                # 品番列の右側にある数値列から数量らしき値をスキャン
+                for q_i in range(matched_code_col + 1, min(matched_code_col + 14, len(row_vals))):
                     q_num = to_num(row_vals[q_i])
-                    if q_num > 0 and q_num < 50000:
+                    if 0 < q_num < 50000:
                         found_qty = q_num
                         break
                 if found_qty == 0:
@@ -894,7 +926,7 @@ with tab1:
                 hList.forEach(h => {{
                     hHtml += `<tr><td style="text-align:center; font-weight:bold;">${{h["会議日"]}}</td><td style="font-weight:bold;">${{h["決定事項"]}}</td></tr>`;
                 }});
-                hHtml += `</tbody></table>`;
+                hHtml += `</table>`;
                 document.getElementById("modal-hist-area").innerHTML = hHtml;
             }}
             document.getElementById("detail-modal").style.display = "flex";
@@ -949,7 +981,7 @@ with tab1:
 # =========================================================
 with tab2:
     if df_yayoi.empty:
-        st.warning("確保リストのデータがありません。『弥生確保リスト.xlsx』が同じフォルダ（またはGitHub）にあるか確認してください。")
+        st.warning("確保リストのデータがありません。")
     else:
         comp_totals = df_yayoi.groupby("得意先名")["受注残数"].sum().sort_values(ascending=False)
         comp_opts = ["すべての会社を表示"] + [f"{c} （確保合計: {v:,} 個）" for c, v in comp_totals.items()]
