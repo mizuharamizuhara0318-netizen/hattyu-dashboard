@@ -8,11 +8,15 @@ import json
 
 st.set_page_config(page_title="発注検討表（Web管理システム）", layout="wide")
 
-# 画面全体の余白調整とタイトル切れ防止のCSS
+# 上部の文字切れを完全に防ぐ余白・ヘッダー調整CSS
 st.markdown("""
 <style>
+    header[data-testid="stHeader"] {
+        height: 2rem !important;
+        background: transparent !important;
+    }
     .block-container {
-        padding-top: 2.2rem !important;
+        padding-top: 3.5rem !important;
         padding-bottom: 1rem !important;
         padding-left: 1.5rem !important;
         padding-right: 1.5rem !important;
@@ -23,12 +27,11 @@ st.markdown("""
         font-size: 22px;
         font-weight: bold;
         color: #1f2937;
+        margin-top: 4px;
         margin-bottom: 10px;
         padding-bottom: 6px;
         border-bottom: 3px solid #2563eb;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
+        line-height: 1.4;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -87,8 +90,10 @@ def load_yayoi_data(file_source):
     df["得意先名"] = df["得意先名"].apply(lambda x: clean_str(x) if clean_str(x) else "不明")
     df["受注残数"] = pd.to_numeric(df["受注残数"], errors="coerce").fillna(0).astype(int)
     df["数量"] = pd.to_numeric(df["数量"], errors="coerce").fillna(0).astype(int)
-    df["受注日"] = pd.to_datetime(df["受注日"], errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
-    df["納入期日"] = pd.to_datetime(df["納入期日"], errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
+    df["受注日_dt"] = pd.to_datetime(df["受注日"], errors="coerce")
+    df["納入期日_dt"] = pd.to_datetime(df["納入期日"], errors="coerce")
+    df["受注日"] = df["受注日_dt"].dt.strftime("%Y-%m-%d").fillna("")
+    df["納入期日"] = df["納入期日_dt"].dt.strftime("%Y-%m-%d").fillna("")
     df["備考"] = df["備考"].apply(clean_str)
     df["倉庫名"] = df["倉庫名"].apply(clean_str)
     df["商品名/摘要"] = df["商品名/摘要"].apply(clean_str)
@@ -96,6 +101,8 @@ def load_yayoi_data(file_source):
         df["担当者名"] = df["担当者名"].apply(clean_str)
     else:
         df["担当者名"] = ""
+    # 受注日の最新順（降順）にソート
+    df = df.sort_values(by=["受注日_dt", "納入期日_dt"], ascending=[False, False], na_position="last")
     return df
 
 @st.cache_data
@@ -103,7 +110,7 @@ def load_excel_master(file_source):
     try:
         wb = openpyxl.load_workbook(file_source, read_only=True, data_only=True)
     except Exception:
-        return pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), "前回決定事項"
         
     target_sheet = "マスター (新) (3)" if "マスター (新) (3)" in wb.sheetnames else wb.sheetnames[0]
     if "マスター (新) (3)" not in wb.sheetnames and "80828" in wb.sheetnames:
@@ -111,11 +118,19 @@ def load_excel_master(file_source):
     ws = wb[target_sheet]
     rows = safe_get_rows(ws)
     
+    # AC列（インデックス28）のヘッダー名を取得（例: 前回決定事項 (8/28)）
+    prev_col_title = "前回決定事項"
+    if rows and len(rows[0]) > 28 and rows[0][28]:
+        prev_col_title = clean_str(rows[0][28])
+
     dec_80828 = {}
+    prev_80828 = {}
     if "80828" in wb.sheetnames:
         for r in safe_get_rows(wb["80828"])[1:]:
             if len(r) > 26 and r[2]:
                 code_k = str(r[2]).strip()
+                if r[25]:
+                    prev_80828[code_k] = clean_str(r[25])
                 if r[26]:
                     dec_80828[code_k] = clean_str(r[26])
 
@@ -128,8 +143,14 @@ def load_excel_master(file_source):
             continue
             
         na_flag = is_na_val(r[14]) or is_na_val(r[25]) or clean_str(r[12]) != ""
+        
+        # AC列（r[28]）＝前回決定事項、AD列（r[29]）＝決定事項
+        prev_dec = clean_str(r[28]) if len(r) > 28 else ""
+        if not prev_dec and hinban in prev_80828:
+            prev_dec = prev_80828[hinban]
+            
         curr_dec = clean_str(r[29]) if len(r) > 29 else ""
-        if not curr_dec and hinban in dec_80828:
+        if not curr_dec and hinban in dec_80828 and target_sheet == "80828":
             curr_dec = dec_80828[hinban]
             
         ndate = clean_str(r[18]) if len(r) > 18 else ""
@@ -154,6 +175,7 @@ def load_excel_master(file_source):
             "発注検討フラグ": int(round(to_num(r[25]), 0)),
             "在庫回転率": int(round(to_num(r[26]) * 100, 0)),
             "リンベル確保数": v_rin,
+            "前回決定事項": prev_dec,
             "決定事項": curr_dec,
             "発注日": "",
             "NA行": na_flag
@@ -181,9 +203,8 @@ def load_excel_master(file_source):
                 if kc < len(r) and clean_str(r[kc]) not in ("", "0"):
                     hist_list.append({"会議日": dt_str, "シート": s, "品番": c_val, "決定事項": clean_str(r[kc])})
     df_hist = pd.DataFrame(hist_list).drop_duplicates(subset=["会議日", "品番", "決定事項"]) if hist_list else pd.DataFrame(columns=["会議日", "シート", "品番", "決定事項"])
-    return df_main, df_hist
+    return df_main, df_hist, prev_col_title
 
-# タイトルとExcel更新アップローダー
 head_col1, head_col2 = st.columns([3, 2])
 with head_col1:
     st.markdown('<div class="app-header">📊 発注検討表（直接編集 ＆ 弥生確保連動システム）</div>', unsafe_allow_html=True)
@@ -200,7 +221,7 @@ if main_src is None:
     st.stop()
 
 df_yayoi = load_yayoi_data(yayoi_src) if yayoi_src is not None else pd.DataFrame()
-df_main, df_hist = load_excel_master(main_src)
+df_main, df_hist, prev_col_title = load_excel_master(main_src)
 
 if df_main.empty:
     st.error("⚠️ 発注検討表のデータ読み込みに失敗しました。")
@@ -235,11 +256,12 @@ if "master_df" not in st.session_state or up_main is not None:
 
 m_df = st.session_state.master_df
 
-# ポップアップ用データの辞書化（高速表示用）
+# ポップアップ用データの辞書化（受注日の最新順ソート済みを維持）
 yayoi_dict = {}
 if not df_yayoi.empty:
-    for code, grp in df_yayoi.groupby("商品コード"):
-        yayoi_dict[code] = grp[["得意先名", "受注残数", "数量", "受注日", "納入期日", "倉庫名", "備考", "担当者名"]].to_dict(orient="records")
+    for code, grp in df_yayoi.groupby("商品コード", sort=False):
+        grp_sorted = grp.sort_values(by=["受注日_dt", "納入期日_dt"], ascending=[False, False], na_position="last")
+        yayoi_dict[code] = grp_sorted[["得意先名", "受注残数", "数量", "受注日", "納入期日", "倉庫名", "備考", "担当者名"]].to_dict(orient="records")
 
 hist_dict = {}
 if not df_hist.empty:
@@ -280,13 +302,14 @@ with tab1:
             v_df["品番"].str.contains(search_kw, case=False, na=False) |
             v_df["商品区分"].str.contains(search_kw, case=False, na=False) |
             v_df["確保会社一覧"].str.contains(search_kw, case=False, na=False) |
+            v_df["前回決定事項"].str.contains(search_kw, case=False, na=False) |
             v_df["決定事項"].str.contains(search_kw, case=False, na=False)
         ]
 
-    # カスタムHTML/JSテーブル用のデータ準備
     records_json = json.dumps(v_df.to_dict(orient="records"), ensure_ascii=False)
     yayoi_json = json.dumps(yayoi_dict, ensure_ascii=False)
     hist_json = json.dumps(hist_dict, ensure_ascii=False)
+    prev_title_html = prev_col_title.replace("(", "<br>(")
 
     html_code = f"""
     <!DOCTYPE html>
@@ -297,7 +320,6 @@ with tab1:
         * {{ box-sizing: border-box; font-family: "Meiryo", "Hiragino Kaku Gothic ProN", sans-serif; }}
         body {{ margin: 0; padding: 0; background: #fff; }}
         
-        /* 上部操作バー */
         .toolbar {{
             display: flex;
             align-items: center;
@@ -323,10 +345,9 @@ with tab1:
         .btn-download {{ background: #2563eb; color: #fff; }}
         .btn-download:hover {{ background: #1d4ed8; }}
         
-        /* Excel再現テーブルコンテナ */
         .table-wrap {{
             width: 100%;
-            height: 600px;
+            height: 610px;
             overflow: auto;
             border: 1px solid #94a3b8;
             position: relative;
@@ -345,7 +366,6 @@ with tab1:
             height: 32px;
         }}
         
-        /* ヘッダー固定と折り返しデザイン（Excel完全再現） */
         thead th {{
             position: sticky;
             top: 0;
@@ -355,36 +375,44 @@ with tab1:
             text-align: center;
             vertical-align: middle;
             line-height: 1.25;
-            height: 68px;
+            height: 72px;
             z-index: 10;
             border-bottom: 2px solid #475569;
             user-select: none;
         }}
-        .red-txt {{ color: #e11d48; font-weight: bold; }}
+        .red-txt {{ color: #e11d48; font-weight: bold; font-size: 11px; }}
         
-        /* 左側4列（No, センター, 品番, 商品区分）の横スクロール固定 */
+        /* 左側4列（No, センター, 品番140px, 商品区分）の横スクロール固定 */
         .sticky-col-1 {{ position: sticky; left: 0px; z-index: 5; background: #fff; }}
         .sticky-col-2 {{ position: sticky; left: 45px; z-index: 5; background: #fff; }}
         .sticky-col-3 {{ position: sticky; left: 115px; z-index: 5; background: #fff; }}
-        .sticky-col-4 {{ position: sticky; left: 225px; z-index: 5; background: #fff; border-right: 2px solid #64748b; }}
+        .sticky-col-4 {{ position: sticky; left: 255px; z-index: 5; background: #fff; border-right: 2px solid #64748b; }}
         thead th.sticky-col-1, thead th.sticky-col-2, thead th.sticky-col-3, thead th.sticky-col-4 {{ z-index: 15; }}
 
-        /* 列幅の厳密な統一（数値は6桁が綺麗に入る78pxに統一） */
-        .w-no {{ width: 45px; min-width: 45px; max-width: 45px; text-align: center; }}
-        .w-center {{ width: 70px; min-width: 70px; max-width: 70px; text-align: center; }}
-        .w-code {{ width: 110px; min-width: 110px; max-width: 110px; text-align: left; }}
-        .w-name {{ width: 220px; min-width: 220px; max-width: 220px; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
-        .w-num {{ width: 78px; min-width: 78px; max-width: 78px; text-align: right; font-variant-numeric: tabular-nums; }}
-        .w-date {{ width: 105px; min-width: 105px; max-width: 105px; text-align: center; }}
+        /* 品番は1行表示（折り返し禁止）で140px確保 */
+        .w-no {{ width: 45px; min-width: 45px; max-width: 45px; text-align: center; white-space: nowrap; }}
+        .w-center {{ width: 70px; min-width: 70px; max-width: 70px; text-align: center; white-space: nowrap; }}
+        .w-code {{ width: 140px; min-width: 140px; max-width: 140px; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+        .w-name {{ width: 210px; min-width: 210px; max-width: 210px; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+        .w-num {{ width: 78px; min-width: 78px; max-width: 78px; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }}
+        .w-date {{ width: 105px; min-width: 105px; max-width: 105px; text-align: center; white-space: nowrap; }}
+        .w-prev-dec {{ width: 170px; min-width: 170px; max-width: 170px; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
         .w-dec {{ width: 230px; min-width: 230px; max-width: 230px; text-align: left; }}
 
-        /* Excelと同じ水色背景セル */
+        /* Excelと同じセル背景色 */
         .bg-cyan {{ background-color: #67e8f9 !important; }}
         .bg-flag-neg {{ background-color: #fecdd3 !important; color: #be123c; font-weight: bold; }}
+        .bg-green {{ background-color: #a3e635 !important; }}
+        .bg-pink-rate {{ background-color: #fbcfe8 !important; color: #be123c; font-weight: bold; }}
+        .bg-yellow-ro {{ background-color: #fef08a !important; color: #1e293b; }}
+        .bg-yellow-edit {{ background-color: #ffff00 !important; }}
         
-        tbody tr:hover td {{ filter: brightness(0.96); }}
+        /* NA行（廃盤など）のダークグレー表示 */
+        tr.na-row td {{ background-color: #4b5563 !important; color: #f3f4f6 !important; }}
+        tr.na-row td .click-link {{ color: #93c5fd !important; }}
+        
+        tbody tr:hover td {{ filter: brightness(0.95); }}
 
-        /* クリック可能なリンク（ポップアップ起動用） */
         .click-link {{
             color: #0284c7;
             font-weight: bold;
@@ -392,18 +420,18 @@ with tab1:
             cursor: pointer;
             display: inline-block;
             width: 100%;
+            white-space: nowrap;
         }}
         .click-link:hover {{ color: #0369a1; background-color: rgba(255,255,255,0.6); border-radius: 3px; }}
         
-        /* 直接編集用インプット */
         .cell-input {{
             width: 100%;
             height: 24px;
-            border: 1px solid #cbd5e1;
-            border-radius: 3px;
+            border: 1px solid #94a3b8;
+            border-radius: 2px;
             padding: 2px 5px;
             font-size: 13px;
-            background: #fffbeb;
+            background: rgba(255, 255, 255, 0.85);
         }}
         .cell-input:focus {{
             outline: 2px solid #2563eb;
@@ -422,8 +450,8 @@ with tab1:
         }}
         .modal-window {{
             background: #fff;
-            width: 92%;
-            max-width: 1000px;
+            width: 94%;
+            max-width: 1060px;
             max-height: 88vh;
             border-radius: 8px;
             box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.25);
@@ -435,7 +463,7 @@ with tab1:
         .modal-header {{
             background: #1e3a8a;
             color: #fff;
-            padding: 12px 18px;
+            padding: 10px 18px;
             display: flex;
             justify-content: space-between;
             align-items: center;
@@ -452,26 +480,25 @@ with tab1:
             cursor: pointer;
         }}
         .modal-body {{
-            padding: 16px;
+            padding: 14px 16px;
             overflow-y: auto;
             display: flex;
             flex-direction: column;
-            gap: 14px;
+            gap: 12px;
         }}
         .summary-bar {{
             display: flex;
-            gap: 12px;
+            gap: 14px;
             flex-wrap: wrap;
             background: #f1f5f9;
-            padding: 10px 14px;
+            padding: 8px 14px;
             border-radius: 6px;
             border-left: 5px solid #2563eb;
             font-size: 13px;
         }}
         .summary-item {{ font-weight: bold; color: #1e293b; }}
-        .summary-item span {{ color: #0284c7; font-size: 15px; margin-left: 4px; }}
+        .summary-item span {{ color: #0284c7; font-size: 15px; margin-left: 3px; }}
         
-        /* モーダル内のクイック編集ボックス */
         .quick-edit-box {{
             background: #fffbeb;
             border: 1px solid #fde68a;
@@ -485,7 +512,7 @@ with tab1:
             background: #e2e8f0;
             border: 1px solid #94a3b8;
             border-radius: 4px;
-            padding: 3px 8px;
+            padding: 2px 8px;
             font-size: 12px;
             cursor: pointer;
             font-weight: bold;
@@ -494,12 +521,13 @@ with tab1:
 
         .modal-grid {{
             display: grid;
-            grid-template-columns: 3fr 2fr;
+            grid-template-columns: 3.2fr 1.8fr;
             gap: 16px;
         }}
         .sub-table {{ width: 100%; border-collapse: collapse; }}
-        .sub-table th {{ background: #e2e8f0; color: #1e293b; padding: 6px; font-size: 12px; height: auto; position: static; border: 1px solid #cbd5e1; }}
+        .sub-table th {{ background: #e2e8f0; color: #1e293b; padding: 6px; font-size: 12px; height: auto; position: static; border: 1px solid #cbd5e1; white-space: nowrap; }}
         .sub-table td {{ padding: 6px; font-size: 12px; height: auto; border: 1px solid #cbd5e1; }}
+        .nowrap-cell {{ white-space: nowrap; text-align: center; }}
         .sec-title {{ font-size: 14px; font-weight: bold; color: #1e3a8a; margin-bottom: 6px; border-bottom: 2px solid #93c5fd; padding-bottom: 3px; }}
     </style>
     </head>
@@ -507,7 +535,7 @@ with tab1:
 
     <div class="toolbar">
         <div class="toolbar-info">表示件数: <span id="row-count">0</span> 件</div>
-        <div class="toolbar-hint">💡 表の「品番」または「在庫確保(弥生)の青数字」をクリックすると、その場で受注内訳ポップアップが開きます！</div>
+        <div class="toolbar-hint">💡 表の「品番」または「在庫確保(弥生)の青数字」をクリックすると、受注日最新順で内訳ポップアップが開きます！</div>
         <div class="btn-group">
             <button class="btn btn-download" onclick="exportEditedCSV()">📥 編集内容を反映したCSVをダウンロード</button>
         </div>
@@ -531,11 +559,12 @@ with tab1:
                     <th class="w-num">在庫確保<br>丸藤</th>
                     <th class="w-num">確保数の<br>ズレ</th>
                     <th class="w-num">入荷後の<br>フリー在庫</th>
-                    <th class="w-num">発注検討<br><span class="red-txt">フラグ</span></th>
+                    <th class="w-num">発注検討<br>フラグ<br><span class="red-txt">マイナスの<br>場合発注検討</span></th>
                     <th class="w-num">在庫回転<br>率</th>
                     <th class="w-num">リンベル<br>確保数</th>
-                    <th class="w-dec">📝決定事項</th>
-                    <th class="w-date">📝発注日</th>
+                    <th class="w-prev-dec">{prev_title_html}</th>
+                    <th class="w-dec">決定事項</th>
+                    <th class="w-date">発注日</th>
                 </tr>
             </thead>
             <tbody id="table-body"></tbody>
@@ -553,31 +582,35 @@ with tab1:
                 <div class="summary-bar" id="modal-summary"></div>
                 
                 <div class="quick-edit-box">
-                    <div style="font-size:12px; font-weight:bold; color:#92400e;">
-                        ✏️ この場で決定事項・入荷予定日を入力（表にもリアルタイム連動します）
-                        <span style="margin-left:10px;">ワンクリック入力:</span>
-                        <button class="stamp-btn" onclick="addStamp('様子見')">＋様子見</button>
-                        <button class="stamp-btn" onclick="addStamp('発注済')">＋発注済</button>
-                        <button class="stamp-btn" onclick="addStamp('確認中')">＋確認中</button>
-                        <button class="stamp-btn" onclick="addStamp('廃盤予定')">＋廃盤予定</button>
+                    <div style="font-size:12px; font-weight:bold; color:#92400e; display:flex; justify-content:space-between; align-items:center;">
+                        <span>✏️ この場で決定事項・入荷予定日を入力（表にもリアルタイム連動します）</span>
+                        <span>
+                            ワンクリック入力:
+                            <button class="stamp-btn" onclick="addStamp('様子見')">＋様子見</button>
+                            <button class="stamp-btn" onclick="addStamp('発注済')">＋発注済</button>
+                            <button class="stamp-btn" onclick="addStamp('確認中')">＋確認中</button>
+                            <button class="stamp-btn" onclick="addStamp('廃盤予定')">＋廃盤予定</button>
+                        </span>
                     </div>
                     <div style="display:flex; gap:10px; align-items:center;">
+                        <label style="font-size:12px; font-weight:bold;">前回決定事項:</label>
+                        <input type="text" id="modal-view-prev" class="cell-input" style="width:180px; background:#fef08a; color:#475569;" readonly>
                         <label style="font-size:12px; font-weight:bold;">入荷予定日:</label>
-                        <input type="text" id="modal-input-ndate" class="cell-input" style="width:140px; background:#fff;" oninput="syncFromModal()">
+                        <input type="text" id="modal-input-ndate" class="cell-input" style="width:120px; background:#fff;" oninput="syncFromModal()">
                         <label style="font-size:12px; font-weight:bold;">決定事項:</label>
                         <input type="text" id="modal-input-dec" class="cell-input" style="flex:1; background:#fff;" oninput="syncFromModal()">
                         <label style="font-size:12px; font-weight:bold;">発注日:</label>
-                        <input type="text" id="modal-input-odate" class="cell-input" style="width:120px; background:#fff;" oninput="syncFromModal()">
+                        <input type="text" id="modal-input-odate" class="cell-input" style="width:110px; background:#fff;" oninput="syncFromModal()">
                     </div>
                 </div>
 
                 <div class="modal-grid">
                     <div>
-                        <div class="sec-title">🏢 得意先別・弥生確保リスト（受注内訳）</div>
+                        <div class="sec-title">🏢 得意先別・弥生確保リスト（受注日の最新順）</div>
                         <div id="modal-yayoi-area"></div>
                     </div>
                     <div>
-                        <div class="sec-title">📜 過去の会議決定履歴（全28回分）</div>
+                        <div class="sec-title">📜 過去の会議決定履歴（最新順）</div>
                         <div id="modal-hist-area"></div>
                     </div>
                 </div>
@@ -591,7 +624,6 @@ with tab1:
         const histMap = {hist_json};
         let currentModalIdx = null;
 
-        // ローカルストレージから編集内容を復元
         const savedEdits = JSON.parse(localStorage.getItem("hattyu_edits_v1") || "{{}}");
         tableData.forEach(r => {{
             if (savedEdits[r["品番"]]) {{
@@ -614,17 +646,19 @@ with tab1:
             let html = "";
 
             tableData.forEach((r, idx) => {{
+                const rowCls = r["NA行"] ? "na-row" : "";
                 const flagCls = (Number(r["発注検討フラグ"]) < 0 && !r["NA行"]) ? "bg-flag-neg" : "bg-cyan";
-                const codeEsc = r["品番"].replace(/'/g, "\\'");
+                const rateVal = Number(r["在庫回転率"]);
+                const rateCls = (!r["NA行"] && rateVal <= 5) ? "bg-pink-rate" : "bg-green";
                 
-                html += `<tr>
+                html += `<tr class="${{rowCls}}">
                     <td class="w-no sticky-col-1">${{r["No"]}}</td>
                     <td class="w-center sticky-col-2">${{r["商品センター"]}}</td>
-                    <td class="w-code sticky-col-3">
-                        <span class="click-link" onclick="openModal(${{idx}})" title="クリックで詳細ポップアップを表示">${{r["品番"]}}</span>
+                    <td class="w-code sticky-col-3" title="${{r["品番"]}}">
+                        <span class="click-link" onclick="openModal(${{idx}})">${{r["品番"]}}</span>
                     </td>
                     <td class="w-name sticky-col-4" title="${{r["商品区分"]}}">${{r["商品区分"]}}</td>
-                    <td class="w-num">${{fmtNum(r["1課発注点"])}}</td>
+                    <td class="w-num">${{r["NA行"] ? "#N/A" : fmtNum(r["1課発注点"])}}</td>
                     <td class="w-num">${{fmtNum(r["2課発注点"])}}</td>
                     <td class="w-num bg-cyan">${{fmtNum(r["在庫数_ロジザード"])}}</td>
                     <td class="w-num bg-cyan">${{fmtNum(r["入荷予定数_ロジザード"])}}</td>
@@ -640,13 +674,14 @@ with tab1:
                     </td>
                     <td class="w-num bg-cyan">${{fmtNum(r["確保数のズレ"])}}</td>
                     <td class="w-num bg-cyan">${{fmtNum(r["入荷後のフリー在庫"])}}</td>
-                    <td class="w-num ${{flagCls}}">${{fmtNum(r["発注検討フラグ"])}}</td>
-                    <td class="w-num">${{fmtNum(r["在庫回転率"])}}%</td>
+                    <td class="w-num ${{flagCls}}">${{r["NA行"] ? "#N/A" : fmtNum(r["発注検討フラグ"])}}</td>
+                    <td class="w-num ${{rateCls}}">${{r["NA行"] ? "#N/A" : fmtNum(r["在庫回転率"]) + "%"}}</td>
                     <td class="w-num">${{fmtNum(r["リンベル確保数"])}}</td>
-                    <td class="w-dec">
+                    <td class="w-prev-dec bg-yellow-ro" title="${{r["前回決定事項"] || ""}}">${{r["前回決定事項"] || ""}}</td>
+                    <td class="w-dec bg-yellow-edit">
                         <input type="text" class="cell-input" id="dec-${{idx}}" value="${{r["決定事項"] || ""}}" oninput="updateCell(${{idx}}, '決定事項', this.value)">
                     </td>
-                    <td class="w-date">
+                    <td class="w-date bg-yellow-edit">
                         <input type="text" class="cell-input" id="odate-${{idx}}" value="${{r["発注日"] || ""}}" oninput="updateCell(${{idx}}, '発注日', this.value)">
                     </td>
                 </tr>`;
@@ -686,26 +721,28 @@ with tab1:
                 <div class="summary-item">発注検討フラグ: <span style="color:#e11d48;">${{fmtNum(r["発注検討フラグ"])}}</span></div>
             `;
 
+            document.getElementById("modal-view-prev").value = r["前回決定事項"] || "";
             document.getElementById("modal-input-ndate").value = r["入荷予定日_ロジザード"] || "";
             document.getElementById("modal-input-dec").value = r["決定事項"] || "";
             document.getElementById("modal-input-odate").value = r["発注日"] || "";
 
-            // 弥生確保テーブルの生成
-            const yList = yayoiMap[code] || [];
+            // 弥生確保テーブル（受注日の最新順でソートして表示）
+            const rawYList = yayoiMap[code] || [];
+            const yList = [...rawYList].sort((a, b) => (b["受注日"] || "").localeCompare(a["受注日"] || ""));
             if (yList.length === 0) {{
                 document.getElementById("modal-yayoi-area").innerHTML = `<div style="padding:12px; color:#64748b; background:#f8fafc; border-radius:4px;">現在、弥生確保リストに『${{code}}』の受注残データはありません。</div>`;
             }} else {{
                 let yHtml = `<table class="sub-table"><thead><tr>
-                    <th>得意先名</th><th>受注残数</th><th>受注数</th><th>受注日</th><th>納入期日</th><th>倉庫名</th><th>備考</th>
+                    <th>得意先名</th><th>受注残数</th><th>受注数</th><th>受注日 (最新順)</th><th>納入期日</th><th>倉庫名</th><th>備考</th>
                 </tr></thead><tbody>`;
                 yList.forEach(y => {{
                     yHtml += `<tr>
                         <td style="font-weight:bold;">${{y["得意先名"]}}</td>
                         <td style="text-align:right; font-weight:bold; color:#0284c7;">${{fmtNum(y["受注残数"])}}</td>
                         <td style="text-align:right;">${{fmtNum(y["数量"])}}</td>
-                        <td style="text-align:center;">${{y["受注日"]}}</td>
-                        <td style="text-align:center;">${{y["納入期日"]}}</td>
-                        <td>${{y["倉庫名"]}}</td>
+                        <td class="nowrap-cell" style="font-weight:bold;">${{y["受注日"]}}</td>
+                        <td class="nowrap-cell">${{y["納入期日"]}}</td>
+                        <td class="nowrap-cell">${{y["倉庫名"]}}</td>
                         <td>${{y["備考"]}}</td>
                     </tr>`;
                 }});
@@ -713,7 +750,7 @@ with tab1:
                 document.getElementById("modal-yayoi-area").innerHTML = yHtml;
             }}
 
-            // 過去履歴テーブルの生成
+            // 過去履歴テーブル（最新順）
             const hList = histMap[code] || [];
             if (hList.length === 0) {{
                 document.getElementById("modal-hist-area").innerHTML = `<div style="padding:12px; color:#64748b; background:#f8fafc; border-radius:4px;">過去の会議シートに決定事項の履歴はありません。</div>`;
@@ -723,7 +760,7 @@ with tab1:
                 </tr></thead><tbody>`;
                 hList.forEach(h => {{
                     hHtml += `<tr>
-                        <td style="text-align:center;">${{h["会議日"]}}</td>
+                        <td class="nowrap-cell">${{h["会議日"]}}</td>
                         <td style="font-weight:bold;">${{h["決定事項"]}}</td>
                     </tr>`;
                 }});
@@ -773,7 +810,7 @@ with tab1:
                 "在庫数_ロジザード", "入荷予定数_ロジザード", "入荷予定日_ロジザード",
                 "確保数_ロジザード", "在庫確保_弥生", "在庫確保_丸藤", "確保数のズレ",
                 "入荷後のフリー在庫", "発注検討フラグ", "在庫回転率", "リンベル確保数",
-                "決定事項", "発注日"
+                "前回決定事項", "決定事項", "発注日"
             ];
             let csv = "\\uFEFF" + cols.join(",") + "\\n";
             tableData.forEach(r => {{
@@ -798,7 +835,7 @@ with tab1:
     </html>
     """
 
-    components.html(html_code, height=665, scrolling=False)
+    components.html(html_code, height=675, scrolling=False)
 
 with tab2:
     st.subheader("🏢 会社（得意先）別 確保・注文検索 ＆ 月別納期スケジュール")
@@ -818,7 +855,7 @@ with tab2:
         if kw_comp:
             yv = yv[yv["得意先名"].str.contains(kw_comp, case=False, na=False) | yv["商品コード"].str.contains(kw_comp, case=False, na=False) | yv["備考"].str.contains(kw_comp, case=False, na=False)]
 
-        yv_merged = pd.merge(yv, m_df[["品番", "在庫数_ロジザード", "入荷予定数_ロジザード", "入荷予定日_ロジザード", "入荷後のフリー在庫", "発注検討フラグ", "決定事項"]], left_on="商品コード", right_on="品番", how="left")
+        yv_merged = pd.merge(yv, m_df[["品番", "在庫数_ロジザード", "入荷予定数_ロジザード", "入荷予定日_ロジザード", "入荷後のフリー在庫", "発注検討フラグ", "前回決定事項", "決定事項"]], left_on="商品コード", right_on="品番", how="left")
         yv_merged = yv_merged.fillna("")
         for col in yv_merged.select_dtypes(include=['object']).columns:
             yv_merged[col] = yv_merged[col].apply(lambda x: "" if is_na_val(x) else str(x))
@@ -832,14 +869,14 @@ with tab2:
                     st.markdown("##### 📈 選択した会社の月別 納入スケジュール（受注残数合計）")
                     st.bar_chart(monthly_sch)
 
-        st.dataframe(yv_merged[["得意先名", "商品コード", "商品名/摘要", "受注残数", "受注日", "納入期日", "備考", "倉庫名", "入荷予定日_ロジザード", "決定事項"]], hide_index=True, use_container_width=True, height=400)
+        st.dataframe(yv_merged[["得意先名", "商品コード", "商品名/摘要", "受注残数", "受注日", "納入期日", "備考", "倉庫名", "入荷予定日_ロジザード", "前回決定事項", "決定事項"]], hide_index=True, use_container_width=True, height=400)
 
 with tab3:
     ch1, ch2 = st.columns(2)
     with ch1:
         st.subheader("🚢 入荷予定あり・発注済みの商品一覧")
         inc = m_df[(m_df["入荷予定数_ロジザード"] > 0) | (m_df["発注日"] != "") | (m_df["入荷予定日_ロジザード"] != "")].copy()
-        st.dataframe(inc[["品番", "商品区分", "在庫数_ロジザード", "入荷予定数_ロジザード", "入荷予定日_ロジザード", "発注日", "決定事項"]], hide_index=True, use_container_width=True, height=500)
+        st.dataframe(inc[["品番", "商品区分", "在庫数_ロジザード", "入荷予定数_ロジザード", "入荷予定日_ロジザード", "発注日", "前回決定事項", "決定事項"]], hide_index=True, use_container_width=True, height=500)
     with ch2:
         st.subheader("📜 過去28回の会議シート 決定事項 全履歴")
         h_kw = st.text_input("品番・決定内容で検索", placeholder="例: 発注 / 様子見")
