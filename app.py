@@ -53,33 +53,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ---------------------------------------------------------
-# 1. 弥生会社名（全342社）の完全内蔵データ
-# ---------------------------------------------------------
-EMBEDDED_COMPANIES = [
-    {"code": "1", "name": "テスト株式会社"}, {"code": "10", "name": "旭電機化成 大阪営業所"},
-    {"code": "1000", "name": "㈱ティーピーインターナショナル"}, {"code": "1001", "name": "岩田工具株式会社"},
-    {"code": "1002", "name": "SEIビジネスクリエイツ株式会社"}, {"code": "1003", "name": "有限会社タカノ保安商会"},
-    {"code": "1004", "name": "有限会社大石製作所"}, {"code": "100400", "name": "アサヒサイクル株式会社"},
-    {"code": "1005", "name": "（有）泉製作所"}, {"code": "1006", "name": "アイバリー（株）"},
-    {"code": "1007", "name": "相模ゴム工業株式会社"}, {"code": "1008", "name": "三洋化成工業株式会社"},
-    {"code": "1009", "name": "新明和工業株式会社"}, {"code": "1010", "name": "住友電気工業株式会社"},
-    {"code": "1011", "name": "大同特殊鋼株式会社"}, {"code": "1012", "name": "株式会社ダイドー"},
-    {"code": "1013", "name": "高砂香料工業株式会社"}, {"code": "1014", "name": "タキロン株式会社"},
-    {"code": "1015", "name": "中外製薬株式会社"}, {"code": "1016", "name": "帝国製薬株式会社"},
-    {"code": "1017", "name": "東洋製罐株式会社"}, {"code": "1018", "name": "日東電工株式会社"},
-    {"code": "1019", "name": "日本精工株式会社"}, {"code": "1020", "name": "日本板硝子株式会社"},
-    {"code": "1021", "name": "日本油脂株式会社"}, {"code": "1022", "name": "パイロットコーポレーション"},
-    {"code": "1023", "name": "阪神化成工業株式会社"}, {"code": "102400", "name": "株式会社カワタキコーポレーション"},
-    {"code": "1025", "name": "フジッコ株式会社"}, {"code": "1026", "name": "古河電気工業株式会社"},
-    {"code": "1027", "name": "三井化学株式会社"}, {"code": "1028", "name": "三菱マテリアル株式会社"},
-    {"code": "1029", "name": "村田製作所"}, {"code": "1030", "name": "株式会社モリタ"},
-    {"code": "104400", "name": "清水産業 株式会社"}, {"code": "127400", "name": "株式会社 丸藤"},
-    {"code": "127410", "name": "株式会社 丸藤 東日本"}, {"code": "132600", "name": "アーネスト株式会社"},
-    {"code": "133000", "name": "株式会社オバタ"}, {"code": "116300", "name": "トップ産業株式会社"},
-    {"code": "900100", "name": "ら・でぃっしゅぼーや株式会社"}, {"code": "900200", "name": "アマゾンベンダー（ホーム）"}
-]
-
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in locals() else "."
 
 SEARCH_DIRS = [
@@ -161,13 +134,27 @@ def load_company_master(file_source):
                     if c_name not in seen:
                         seen.add(c_name)
                         loaded.append({"code": c_code, "name": c_name})
+                if len(loaded) > 50:
+                    break
             except Exception:
                 continue
-    # 確実に全内蔵データをマージ
-    for ec in EMBEDDED_COMPANIES:
-        if ec["name"] not in seen:
-            seen.add(ec["name"])
-            loaded.append(ec)
+
+    # 万が一ファイルが見つからない場合のフォールバック（主要企業を網羅）
+    if not loaded:
+        fallback_comps = [
+            {"code": "1", "name": "テスト株式会社"}, {"code": "10", "name": "旭電機化成 大阪営業所"},
+            {"code": "1000", "name": "㈱ティーピーインターナショナル"}, {"code": "1001", "name": "岩田工具株式会社"},
+            {"code": "1002", "name": "SEIビジネスクリエイツ株式会社"}, {"code": "1003", "name": "有限会社タカノ保安商会"},
+            {"code": "1004", "name": "有限会社大石製作所"}, {"code": "104400", "name": "清水産業 株式会社"},
+            {"code": "127400", "name": "株式会社 丸藤"}, {"code": "127410", "name": "株式会社 丸藤 東日本"},
+            {"code": "132600", "name": "アーネスト株式会社"}, {"code": "133000", "name": "株式会社オバタ"},
+            {"code": "116300", "name": "トップ産業株式会社"}, {"code": "900100", "name": "ら・でぃっしゅぼーや株式会社"},
+            {"code": "900200", "name": "アマゾンベンダー（ホーム）"}
+        ]
+        for fc in fallback_comps:
+            if fc["name"] not in seen:
+                seen.add(fc["name"])
+                loaded.append(fc)
     return loaded
 
 @st.cache_data
