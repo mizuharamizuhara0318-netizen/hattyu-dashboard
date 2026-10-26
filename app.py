@@ -102,7 +102,6 @@ def load_yayoi_data(file_source):
     else:
         df["担当者名"] = ""
     
-    # 手動追加された弥生データを結合
     if os.path.exists(MANUAL_YAYOI_CSV):
         try:
             df_man = pd.read_csv(MANUAL_YAYOI_CSV).fillna("")
@@ -116,7 +115,6 @@ def load_yayoi_data(file_source):
 
 @st.cache_data
 def load_sales_csvs(uploaded_files):
-    """今月の売上CSV群を合算して、品番ごとの今月売れ数を計算する"""
     if not uploaded_files:
         return pd.Series(dtype=int)
     
@@ -132,7 +130,6 @@ def load_sales_csvs(uploaded_files):
             except Exception:
                 continue
         
-        # 売上CSVの列構造に合わせたパース（商品コード、数量、日付などの列を想定）
         code_col = next((c for c in df_s.columns if "商品コード" in c or "品番" in c), None)
         qty_col = next((c for c in df_s.columns if "数量" in c or "数" in c), None)
         date_col = next((c for c in df_s.columns if "日" in c or "日付" in c), None)
@@ -143,7 +140,6 @@ def load_sales_csvs(uploaded_files):
             temp["数量"] = pd.to_numeric(df_s[qty_col], errors="coerce").fillna(0)
             if date_col:
                 temp["日付"] = pd.to_datetime(df_s[date_col], errors="coerce").dt.strftime("%Y-%m")
-                # 今月分のデータのみ抽出
                 temp = temp[temp["日付"] == current_year_month]
             all_dfs.append(temp)
             
@@ -254,7 +250,7 @@ def load_excel_master(file_source):
 
 head_col1, head_col2 = st.columns([3, 2])
 with head_col1:
-    st.markdown('<div class="app-header">📊 発注検討表（直接編集 ＆ 弥生確保連動システム）</div>', unsafe_allow_html=True)
+    st.markdown('<div class="app-header">📊 発注検討表（Web管理システム）</div>', unsafe_allow_html=True)
 with head_col2:
     with st.expander("📂 最新データ更新 ＆ 売れ数CSV読込"):
         if st.button("🔄 最新データを再読み込み"):
@@ -280,7 +276,7 @@ if main_src is None:
 df_yayoi = load_yayoi_data(yayoi_src) if yayoi_src is not None else pd.DataFrame()
 df_main, df_hist, prev_col_title = load_excel_master(main_src)
 
-# 売上CSVがアップロードされている場合、今月売れ数を計算してマージ
+# 売上CSVのデータを結合・マッピング
 sales_series = load_sales_csvs(up_sales)
 if not sales_series.empty:
     df_main["今月売れ数"] = df_main["品番"].map(sales_series).fillna(0).astype(int)
@@ -331,10 +327,12 @@ if not df_hist.empty:
     for code, grp in df_hist.sort_values("会議日", ascending=False).groupby("品番"):
         hist_dict[code] = grp[["会議日", "決定事項", "シート"]].to_dict(orient="records")
 
-tab1, tab2, tab3 = st.tabs([
-    "📋 1. 発注検討表（Excel完全再現・クリック即ポップアップ）",
-    "🏢 2. 会社（得意先）別 確保・注文検索",
-    "🕒 3. 入荷予定・過去の発注決定履歴"
+# 🗂️ タブ構成をきっちり独立
+tab1, tab2, tab3, tab4 = st.tabs([
+    "📋 1. 発注検討表（直接編集・クリックポップアップ）",
+    "🏢 2. 会社（得意先）別 確保データ検索",
+    "➕ 3. 新規確保データの登録（弥生代替）",
+    "🕒 4. 入荷予定・過去の会議決定履歴"
 ])
 
 with tab1:
@@ -352,7 +350,6 @@ with tab1:
     if filter_mode == "🚨 要発注（発注検討フラグがマイナスのみ）":
         v_df = v_df[(v_df["発注検討フラグ"] < 0) & (~v_df["NA行"])]
     elif filter_mode == "🔥 【ヒット商品】在庫があるのに今月売れている":
-        # フリー在庫が5個以上あるのに、今月すでに5個以上売れている商品（ヒット商品）
         v_df = v_df[(v_df["入荷後のフリー在庫"] >= 5) & (v_df["今月売れ数"] >= 5) & (~v_df["NA行"])]
     elif filter_mode == "確保数のズレがある商品":
         v_df = v_df[v_df["確保数のズレ"] != 0]
@@ -900,56 +897,15 @@ with tab1:
     components.html(html_code, height=675, scrolling=False)
 
 with tab2:
-    st.subheader("🏢 会社（得意先）別 確保・注文検索 ＆ 新規確保データの追加")
-    
-    # 新規確保データの直接追加フォーム
-    with st.expander("➕ 【弥生を使わずここから追加】新規の確保データを登録する"):
-        with st.form("add_yayoi_form"):
-            f_c1, f_c2, f_c3 = st.columns(3)
-            add_comp = f_c1.text_input("得意先名（会社名） *")
-            add_code = f_c2.text_input("品番（商品コード） *")
-            add_qty = f_c3.number_input("受注残数（数量） *", min_value=1, value=1)
-
-            f_c4, f_c5, f_c6 = st.columns(3)
-            add_date = f_c4.date_input("受注日", value=datetime.date.today())
-            add_limit = f_c5.date_input("納入期日", value=datetime.date.today())
-            add_memo = f_c6.text_input("備考 / 倉庫名")
-
-            submitted = st.form_submit_button("💾 確保データを追加する")
-            if submitted:
-                if not add_comp or not add_code:
-                    st.error("⚠️ 「得意先名」と「品番」は必須です。")
-                else:
-                    new_row = {
-                        "得意先名": add_comp.strip(),
-                        "商品コード": add_code.strip(),
-                        "受注残数": int(add_qty),
-                        "数量": int(add_qty),
-                        "受注日": add_date.strftime("%Y-%m-%d"),
-                        "納入期日": add_limit.strftime("%Y-%m-%d"),
-                        "受注日_dt": pd.to_datetime(add_date),
-                        "納入期日_dt": pd.to_datetime(add_limit),
-                        "備考": add_memo.strip(),
-                        "倉庫名": "WEB入力",
-                        "担当者名": "システム追加"
-                    }
-                    df_new = pd.DataFrame([new_row])
-                    if os.path.exists(MANUAL_YAYOI_CSV):
-                        df_existing = pd.read_csv(MANUAL_YAYOI_CSV)
-                        df_combined_man = pd.concat([df_existing, df_new], ignore_index=True)
-                    else:
-                        df_combined_man = df_new
-                    df_combined_man.to_csv(MANUAL_YAYOI_CSV, index=False, encoding="utf-8-sig")
-                    st.success(f"✅ 『{add_comp}』様の確保データ（品番: {add_code} / 数量: {add_qty}）を追加しました！再読み込みボタンを押して反映してください。")
-
+    st.subheader("🏢 会社（得意先）別 確保データ検索 ＆ 月別スケジュール")
     if df_yayoi.empty:
-        st.warning("『弥生確保リスト.xlsx』、または手動追加データがありません。")
+        st.warning("『弥生確保リスト.xlsx』、または追加データがありません。")
     else:
         comp_totals = df_yayoi.groupby("得意先名")["受注残数"].sum().sort_values(ascending=False)
         comp_opts = ["すべての会社を表示"] + [f"{c} （確保合計: {v:,} 個）" for c, v in comp_totals.items()]
         c1, c2 = st.columns(2)
-        sel_comp = c1.selectbox("会社名（得意先）を選択", comp_opts)
-        kw_comp = c2.text_input("会社名・品番・備考で絞り込み", placeholder="例: 丸藤 / トップ産業 / 11月")
+        sel_comp = c1.selectbox("🏢 会社名（得意先）をプルダウンで選択", comp_opts)
+        kw_comp = c2.text_input("🔍 品番・備考でさらに絞り込み", placeholder="例: AHL-2203 / 11月")
 
         yv = df_yayoi.copy()
         if sel_comp != "すべての会社を表示":
@@ -972,9 +928,55 @@ with tab2:
                     st.markdown("##### 📈 選択した会社の月別 納入スケジュール（受注残数合計）")
                     st.bar_chart(monthly_sch)
 
-        st.dataframe(yv_merged[["得意先名", "商品コード", "商品名/摘要", "受注残数", "受注日", "納入期日", "備考", "倉庫名", "入荷予定日_ロジザード", "前回決定事項", "決定事項"]], hide_index=True, use_container_width=True, height=400)
+        st.dataframe(yv_merged[["得意先名", "商品コード", "商品名/摘要", "受注残数", "受注日", "納入期日", "備考", "倉庫名", "入荷予定日_ロジザード", "前回決定事項", "決定事項"]], hide_index=True, use_container_width=True, height=450)
 
 with tab3:
+    st.subheader("➕ 新規確保データの登録（弥生代替入力フォーム）")
+    st.info("💡 弥生にログインしなくても、ここから新しい確保データ（受注残）を直接追加できます。")
+    
+    with st.form("add_yayoi_form_standalone"):
+        f_c1, f_c2, f_c3 = st.columns(3)
+        add_comp = f_c1.text_input("得意先名（会社名） *", placeholder="例: 株式会社〇〇")
+        
+        # 品番をプルダウン（セレクトボックス）または直接入力から選べるようにする
+        all_hinban_opts = sorted(m_df["品番"].unique().tolist())
+        add_code = f_c2.selectbox("品番（商品コードを選択） *", options=all_hinban_opts)
+        
+        add_qty = f_c3.number_input("受注残数（数量） *", min_value=1, value=1)
+
+        f_c4, f_c5, f_c6 = st.columns(3)
+        add_date = f_c4.date_input("受注日", value=datetime.date.today())
+        add_limit = f_c5.date_input("納入期日", value=datetime.date.today())
+        add_memo = f_c6.text_input("備考 / 倉庫名", placeholder="例: 11月上旬 / 名古屋DC")
+
+        submitted = st.form_submit_button("💾 新規確保データを登録する", type="primary")
+        if submitted:
+            if not add_comp or not add_code:
+                st.error("⚠️ 「得意先名」と「品番」は必須です。")
+            else:
+                new_row = {
+                    "得意先名": add_comp.strip(),
+                    "商品コード": add_code.strip(),
+                    "受注残数": int(add_qty),
+                    "数量": int(add_qty),
+                    "受注日": add_date.strftime("%Y-%m-%d"),
+                    "納入期日": add_limit.strftime("%Y-%m-%d"),
+                    "受注日_dt": pd.to_datetime(add_date),
+                    "納入期日_dt": pd.to_datetime(add_limit),
+                    "備考": add_memo.strip(),
+                    "倉庫名": "WEB入力",
+                    "担当者名": "システム追加"
+                }
+                df_new = pd.DataFrame([new_row])
+                if os.path.exists(MANUAL_YAYOI_CSV):
+                    df_existing = pd.read_csv(MANUAL_YAYOI_CSV)
+                    df_combined_man = pd.concat([df_existing, df_new], ignore_index=True)
+                else:
+                    df_combined_man = df_new
+                df_combined_man.to_csv(MANUAL_YAYOI_CSV, index=False, encoding="utf-8-sig")
+                st.success(f"✅ 『{add_comp}』様の確保データ（品番: {add_code} / 数量: {add_qty}）を登録しました！上部の「🔄 最新データを再読み込み」を押すと表に反映されます。")
+
+with tab4:
     ch1, ch2 = st.columns(2)
     with ch1:
         st.subheader("🚢 入荷予定あり・発注済みの商品一覧")
