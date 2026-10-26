@@ -1,4 +1,3 @@
-import streamlit as str_lit
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
@@ -9,7 +8,6 @@ import json
 
 st.set_page_config(page_title="発注検討表（Web管理システム）", layout="wide")
 
-# 弥生の受注伝票風のカラーリングとクラシックな業務画面CSS
 st.markdown("""
 <style>
     header[data-testid="stHeader"] {
@@ -34,7 +32,6 @@ st.markdown("""
         border-bottom: 3px solid #2563eb;
         line-height: 1.4;
     }
-    /* 弥生風入力フォームのスタイル */
     .yayoi-form-box {
         background-color: #f0f7f4;
         border: 2px solid #2e7d32;
@@ -147,15 +144,26 @@ def load_sales_csvs(uploaded_files):
             except Exception:
                 continue
         
-        # あらゆるCSVの列名揺れに対応
-        code_col = next((c for c in df_s.columns if "商品コード" in c or "品番" in c or "コード" in c), None)
-        qty_col = next((c for c in df_s.columns if "数量" in c or "数" in c or "残" in c), None)
+        # どんな列名構造（商品コード、品番、数量、数など）でも柔軟にヒットさせる
+        code_col = next((c for c in df_s.columns if any(k in str(c) for k in ["商品コード", "品番", "コード", "商品"])), None)
+        qty_col = next((c for c in df_s.columns if any(k in str(c) for k in ["数量", "数", "残", "受注残"])), None)
         
         if code_col and qty_col:
             temp = pd.DataFrame()
             temp["商品コード"] = df_s[code_col].astype(str).str.strip()
             temp["数量"] = pd.to_numeric(df_s[qty_col], errors="coerce").fillna(0)
             all_dfs.append(temp)
+        elif len(df_s.columns) >= 2:
+            # 万が一列名が特殊な場合、2列目を品番、適当な数値を拾うフォールバック
+            temp = pd.DataFrame()
+            temp["商品コード"] = df_s.iloc[:, 1].astype(str).str.strip()
+            # 数値っぽい列を探す
+            for col_idx in range(2, len(df_s.columns)):
+                parsed = pd.to_numeric(df_s.iloc[:, col_idx], errors="coerce")
+                if parsed.sum() > 0:
+                    temp["数量"] = parsed.fillna(0)
+                    all_dfs.append(temp)
+                    break
             
     if not all_dfs:
         return pd.Series(dtype=int)
@@ -271,14 +279,10 @@ with head_col2:
             st.cache_data.clear()
             if "master_df" in st.session_state:
                 del st.session_state.master_df
-            st.rerent = getattr(st, "rerun", None)
-            if st.rerent:
-                st.rerent()
-            else:
-                st.experimental_rerun()
+            st.rerun()
         up_main = st.file_uploader("① 発注検討表.xlsx", type=["xlsx"], key="up_m")
         up_yayoi = st.file_uploader("② 弥生確保リスト.xlsx", type=["xlsx"], key="up_y")
-        up_sales = st.file_uploader("③ 売上CSV（複数選択可で自動合算）", type=["csv"], accept_multiple_files=True, key="up_s")
+        up_sales = st.file_uploader("③ 売上CSV群（ yayoi_xxxx.csv をまとめて選択可）", type=["csv"], accept_multiple_files=True, key="up_s")
 
 main_src = up_main if up_main is not None else (MAIN_EXCEL if os.path.exists(MAIN_EXCEL) else None)
 yayoi_src = up_yayoi if up_yayoi is not None else (YAYOI_EXCEL if os.path.exists(YAYOI_EXCEL) else None)
@@ -949,23 +953,22 @@ with tab3:
         <div class="yayoi-form-header">💻 受注伝票入力（弥生販売風・新規確保データの登録）</div>
     """, unsafe_allow_html=True)
     
-    # 既存の得意先名一覧を抽出してプルダウン候補にする
+    # 既存の得意先名一覧＋アマゾン等の主要取引先をプルダウン候補に含める
     existing_companies = []
     if not df_yayoi.empty and "得意先名" in df_yayoi.columns:
         existing_companies = sorted(df_yayoi["得意先名"].unique().tolist())
+    if "アマゾンベンダー（ホーム）" not in existing_companies:
+        existing_companies.insert(0, "アマゾンベンダー（ホーム）")
     
     with st.form("add_yayoi_form_yayoi_style"):
         f_c1, f_c2, f_c3 = st.columns([2, 2, 1])
         
-        # 得意先名（プルダウン選択 or 新規直接入力の切り替え用）
+        # 得意先名（プルダウン選択 or 新規直接入力）
         comp_mode = f_c1.radio("得意先名の入力方法", ["既存一覧から選択", "新規直接入力"], horizontal=True)
-        if comp_mode == "既存一覧从選択" or existing_companies:
+        if comp_mode == "既存一覧から選択":
             add_comp = f_c2.selectbox("得意先名（会社名）", options=existing_companies if existing_companies else ["(データなし)"])
         else:
-            add_comp = f_c2.text_input("得意先名（会社名） *", placeholder="例: 株式会社〇〇")
-            
-        if comp_mode == "新規直接入力":
-            add_comp = f_c2.text_input("得意先名（会社名） *", placeholder="例: 株式会社〇〇")
+            add_comp = f_c2.text_input("得意先名（会社名） *", placeholder="例: アマゾンベンダー（ホーム）")
 
         all_hinban_opts = sorted(m_df["品番"].unique().tolist())
         add_code = f_c1.selectbox("商品コード（品番） *", options=all_hinban_opts)
@@ -974,7 +977,7 @@ with tab3:
         f_c4, f_c5, f_c6 = st.columns(3)
         add_date = f_c4.date_input("受注日", value=datetime.date.today())
         add_limit = f_c5.date_input("納入期日", value=datetime.date.today())
-        add_memo = f_c6.text_input("摘要 / 備考", placeholder="例: コーポさっぽろ / 名古屋DC")
+        add_memo = f_c6.text_input("摘要 / 備考", placeholder="例: 11月上旬 / 名古屋DC")
 
         submitted = st.form_submit_button("💾 この内容で登録（F12）", type="primary")
         if submitted:
@@ -1001,7 +1004,14 @@ with tab3:
                 else:
                     df_combined_man = df_new
                 df_combined_man.to_csv(MANUAL_YAYOI_CSV, index=False, encoding="utf-8-sig")
-                st.success(f"✅ 『{add_comp}』様の確保データ（品番: {add_code} / 数量: {add_qty}）を登録しました！上部の「🔄 最新データを再読み込み」を押すと表に反映されます。")
+                
+                # 自動キャッシュクリア＆ページ再読み込みで即時反映！
+                st.cache_data.clear()
+                if "master_df" in st.session_state:
+                    del st.session_state.master_df
+                st.success(f"✅ 『{add_comp}』様の確保データ（品番: {add_code} / 数量: {add_qty}）を登録しました！自動で表に反映します...")
+                st.rerun()
+                
     st.markdown("</div>", unsafe_allow_html=True)
 
 with tab4:
