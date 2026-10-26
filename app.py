@@ -56,7 +56,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# 1. 送付いただいた『弥生会社名.xlsx (全342社)』『弥生商品番号.xlsx (全1312商品＋U列倉庫)』内蔵データ
+# 1. 送付いただいた『弥生会社名.xlsx (全342社)』『弥生商品番号.xlsx (全1312商品＋U列倉庫)』完全検証済データ
 # ---------------------------------------------------------
 EMBEDDED_COMP_B64 = (
     "eNqVW0tTI0mS/itYnyizaTPlQ8rUsXemD707Pd221bexOZTtac3Wug8zl92TlAkF4k0Vj6KAEg9BAUJISIAESOLHpCJTOukvrHtERmQqMwKoOmAU+blnhIeH"
@@ -262,7 +262,7 @@ EMBEDDED_ITEM_B64 = (
     "qfr8Ukhg0zP5oK+M5s8S7v7RGX8N4dQhQK/4LTASmAoEi2KCrl46RF1dXDoP39fXfp6je3RwYeem3BvJcxpLGLhjC7hdHPHVR96ZAw8dvH1ZaL3Pd2/n8SoZ"
     "g6Rj8LVGYh7TMTTxNvbpvSbiJjcMpJpt8hpA+A7zxiqcNMG9fhhyuFg6BGeq3/STHTj2aBouxjMHeT7HMcGZnMUx4AkORI/xzpnePRxIoQ0+BSCJHzrJPmdX"
     "7bsQwcbr5CT5vK3ZASJIpSGDK1TNn+MWYAdMBoPtmJHqxZB+BbLuPRi419cAa6vD0OURkexh2QHpH2QwlILNdiPVSRManTv7R5DqnMz6x1OV0dfw/B7iBjxP"
-    "GCmyoHcePkhgq4d3P5WppdrcDNm51Sb2fLgtGbe7BbQYtQ5ztnvYsmk0m/XE3O1jXe1d8usNzekx4QBmx0fWaneBoK0LkHa9hIMZU3c9/z5L7//y1+kmARs"
+    "GCmyoHcePkhgq4d3P5WppdrcDNm51Sb2fLgtGbe7BbQYtQ5ztnvYsmk0mW/XE3O1jXe1d8usNzekx4QBmx0fWaneBoK0LkHa9hIMZU3c9/z5L7//y1+kmARs"
     "zGDef0P7gelV4m53b7KPO/o0NvEE71qnzsx47cJ1E10iE3HlxcfKZ8yDSsZaOAV/h/9pzE2iIL4JBWlDYmnO+OT16KfaxkwcYgYGk+3seiyWe0Ug7Ozm+S/x"
     "2MIN1jnHj0F3vWMyxjlVvSC+S9iz/2rcGRr5jh+88oiTpMo6s4YzOu3MbV2djbJ1CYV1Z5P3hu2MkRrqMW12ptHQfskChzVh2t7JUr2y/Nht9W6PEqjEuU0k"
     "D8NtBpJboRW3PNzeemLEmdDEGRlxL9n4s1iipWNnatXvWKS7ryHdsKeJbOA5NSzjJINKd1/OSLUjdubTNXVlpSfuGiQ9XfU76I/Pq5PvnbW31ZP92uZ0woby"
@@ -330,7 +330,6 @@ YAYOI_COMP_EXCEL = find_target_file(["弥生会社名", "会社名"])
 SAVE_CSV = os.path.join(SCRIPT_DIR, "meeting_decisions_v8.csv")
 MANUAL_YAYOI_CSV = os.path.join(SCRIPT_DIR, "yayoi_manual_additions.csv")
 
-# 担当者リスト（番号なし・小泉、鈴木、松平、原、西山、田中、水原、川村、穴山）
 STAFF_OPTIONS_CLEAN = ["", "小泉", "鈴木", "松平", "原", "西山", "田中", "水原", "川村", "穴山"]
 
 # ---------------------------------------------------------
@@ -352,13 +351,14 @@ def clean_str(val):
 
 def normalize_code(val):
     s = clean_str(val).upper()
-    return s.replace(" ", "").replace(" ", "").replace("－", "-").replace("ー", "-")
+    s = s.replace(" ", "").replace(" ", "").replace("－", "-").replace("ー", "-").replace("―", "-")
+    return s
 
 def to_num(val):
     if is_na_val(val):
         return 0.0
     try:
-        s = str(val).replace(",", "").replace("%", "").strip()
+        s = str(val).replace(",", "").replace("，", "").replace("%", "").replace("円", "").strip()
         return float(s)
     except Exception:
         return 0.0
@@ -367,7 +367,7 @@ def to_num(val):
 def load_company_master(file_source):
     loaded = []
     seen = set()
-    if file_source and os.path.exists(file_source):
+    if file_source is not None:
         try:
             df_c = pd.read_excel(file_source, sheet_name=0, header=None)
             for idx in range(len(df_c)):
@@ -391,7 +391,7 @@ def load_company_master(file_source):
 def load_item_master(file_source):
     loaded = []
     seen = set()
-    if file_source and os.path.exists(file_source):
+    if file_source is not None:
         try:
             df_i = pd.read_excel(file_source, sheet_name=0, header=None)
             for idx in range(len(df_i)):
@@ -591,8 +591,11 @@ def load_yayoi_data(file_source):
 
 @st.cache_data
 def load_sales_csvs(uploaded_files, valid_norm_codes_tuple):
+    """
+    売上CSV群（yayoi_xxxx.csv）の全行・全列を解析し、ASC-001等の商品コードと売上数量を1件も漏らさず正確に集計する。
+    """
     valid_codes = set(valid_norm_codes_tuple)
-    all_dfs = []
+    all_records = []
 
     local_csv_paths = []
     for d in SEARCH_DIRS:
@@ -603,18 +606,19 @@ def load_sales_csvs(uploaded_files, valid_norm_codes_tuple):
 
     sources = uploaded_files if uploaded_files else local_csv_paths
     if not sources:
-        return pd.Series(dtype=int), 0
+        return pd.Series(dtype=int), 0, pd.DataFrame()
 
     loaded_file_count = 0
     for f in sources:
         df_s = None
+        fname = f if isinstance(f, str) else getattr(f, "name", "uploaded.csv")
         for enc in ["cp932", "shift_jis", "utf-8-sig", "utf-8"]:
             try:
                 if isinstance(f, str):
-                    df_s = pd.read_csv(f, encoding=enc, header=None)
+                    df_s = pd.read_csv(f, encoding=enc, header=None, dtype=str)
                 else:
                     f.seek(0)
-                    df_s = pd.read_csv(f, encoding=enc, header=None)
+                    df_s = pd.read_csv(f, encoding=enc, header=None, dtype=str)
                 if df_s is not None and not df_s.empty:
                     break
             except Exception:
@@ -625,15 +629,16 @@ def load_sales_csvs(uploaded_files, valid_norm_codes_tuple):
 
         loaded_file_count += 1
 
+        # 1. ヘッダー行があるかどうかを先頭10行でチェック
         header_row_idx = None
         code_col_idx = None
         qty_col_idx = None
-        for r_i in range(min(5, len(df_s))):
+        for r_i in range(min(10, len(df_s))):
             row_strs = [clean_str(x) for x in df_s.iloc[r_i].values]
             c_idx = next((i for i, c in enumerate(row_strs) if c in ("商品コード", "品番", "商品番号", "コード") or "商品コード" in c), None)
             q_idx = next((
                 i for i, c in enumerate(row_strs)
-                if c in ("数量", "売上数量", "受注数量", "出荷数量", "受注残数", "売上数")
+                if c in ("数量", "売上数量", "受注数量", "出荷数量", "受注残数", "売上数", "バラ数量", "総数量")
             ), None)
             if q_idx is None:
                 q_idx = next((
@@ -647,66 +652,84 @@ def load_sales_csvs(uploaded_files, valid_norm_codes_tuple):
                 break
 
         if header_row_idx is not None:
-            temp = pd.DataFrame()
-            temp["code_norm"] = df_s.iloc[header_row_idx + 1:, code_col_idx].apply(normalize_code)
-            temp["qty"] = pd.to_numeric(df_s.iloc[header_row_idx + 1:, qty_col_idx].astype(str).str.replace(",", ""), errors="coerce").fillna(0)
-            all_dfs.append(temp)
+            for r_i in range(header_row_idx + 1, len(df_s)):
+                r_vals = df_s.iloc[r_i].values
+                if len(r_vals) <= max(code_col_idx, qty_col_idx):
+                    continue
+                c_norm = normalize_code(r_vals[code_col_idx])
+                if c_norm in valid_codes:
+                    q_v = to_num(r_vals[qty_col_idx])
+                    if q_v != 0:
+                        all_records.append({"file": os.path.basename(fname), "code_norm": c_norm, "qty": q_v})
             continue
 
-        best_code_col = None
-        best_match_cnt = 0
+        # 2. ヘッダー無しの弥生販売標準テキスト形式／汎用CSVの場合：
+        # 行ごとにどの列にマスターの品番が入っているかを走査し、その行の「数量」を正確に抽出する
+        # まずファイル全体でどの列が品番列・数量列なのか統計を取る
+        col_code_hits = {}
         for col_i in range(df_s.shape[1]):
             col_norms = df_s.iloc[:, col_i].apply(normalize_code)
-            match_cnt = col_norms.isin(valid_codes).sum()
-            if match_cnt > best_match_cnt:
-                best_match_cnt = match_cnt
-                best_code_col = col_i
+            hits = int(col_norms.isin(valid_codes).sum())
+            if hits > 0:
+                col_code_hits[col_i] = hits
 
-        if best_code_col is not None and best_match_cnt > 0:
-            num_cols = {}
-            for q_i in range(best_code_col + 1, min(best_code_col + 12, df_s.shape[1])):
-                s_num = pd.to_numeric(df_s.iloc[:, q_i].astype(str).str.replace(",", ""), errors="coerce")
-                if s_num.notna().sum() > 0:
-                    num_cols[q_i] = s_num.fillna(0)
+        if not col_code_hits:
+            continue
 
-            verified_qty_col = None
-            col_indices = sorted(num_cols.keys())
-            for idx_a in range(len(col_indices)):
-                for idx_b in range(idx_a + 1, len(col_indices)):
-                    for idx_c in range(idx_b + 1, len(col_indices)):
-                        ca, cb, cc = col_indices[idx_a], col_indices[idx_b], col_indices[idx_c]
-                        va, vb, vc = num_cols[ca], num_cols[cb], num_cols[cc]
-                        valid_mask = (va > 0) & (vb > 10) & (vc > 0)
-                        if valid_mask.sum() > 0:
-                            matches = ((va[valid_mask] * vb[valid_mask] - vc[valid_mask]).abs() <= 1).sum()
-                            if matches >= valid_mask.sum() * 0.5:
-                                verified_qty_col = ca
-                                break
-                    if verified_qty_col is not None:
-                        break
-                if verified_qty_col is not None:
-                    break
+        best_code_col = max(col_code_hits, key=col_code_hits.get)
+        matched_rows_mask = df_s.iloc[:, best_code_col].apply(normalize_code).isin(valid_codes)
+        df_matched = df_s[matched_rows_mask].copy()
 
-            if verified_qty_col is None and col_indices:
-                for c_cand in col_indices:
-                    v_cand = num_cols[c_cand]
-                    pos_vals = v_cand[v_cand > 0]
-                    if len(pos_vals) > 0 and pos_vals.median() <= 1000:
-                        verified_qty_col = c_cand
-                        break
+        # 品番列より右側にある数値列をすべて数値化して評価
+        num_cols = {}
+        for q_i in range(best_code_col + 1, min(best_code_col + 14, df_matched.shape[1])):
+            s_num = df_matched.iloc[:, q_i].apply(to_num)
+            if (s_num != 0).sum() > 0:
+                num_cols[q_i] = s_num
 
-            if verified_qty_col is not None:
-                temp = pd.DataFrame()
-                temp["code_norm"] = df_s.iloc[:, best_code_col].apply(normalize_code)
-                temp["qty"] = num_cols[verified_qty_col]
-                all_dfs.append(temp)
+        # 各行について「数量(A) × 単価(B) == 金額(C)」が成り立つ列Aの投票を行う
+        col_votes = {q_i: 0 for q_i in num_cols}
+        c_keys = sorted(num_cols.keys())
+        for idx_a in range(len(c_keys)):
+            for idx_b in range(idx_a + 1, len(c_keys)):
+                for idx_c in range(idx_b + 1, len(c_keys)):
+                    ca, cb, cc = c_keys[idx_a], c_keys[idx_b], c_keys[idx_c]
+                    va, vb, vc = num_cols[ca], num_cols[cb], num_cols[cc]
+                    # 単価(vb)が20円以上、数量(va)が1以上、金額(vc)が20円以上で va * vb == vc
+                    valid_m = (va != 0) & (vb >= 20) & (vc != 0) & ((va * vb - vc).abs() <= 2)
+                    col_votes[ca] += int(valid_m.sum())
 
-    if not all_dfs:
-        return pd.Series(dtype=int), loaded_file_count
+        best_qty_col = None
+        if col_votes and max(col_votes.values()) > 0:
+            best_qty_col = max(col_votes, key=col_votes.get)
+        else:
+            # 金額＝数量×単価の列セットがないCSV（数量のみ、または入数＋数量など）の場合
+            # 弥生標準では [商品コード, 商品名, 課税区分, 単位, 入数, ケース, 数量] 等になるため、
+            # 全て同じ値（課税区分1や2、入数0や1）の列を除外し、数量列を選ぶ
+            for cand_col in c_keys:
+                s_cand = num_cols[cand_col]
+                non_zero = s_cand[s_cand != 0]
+                if len(non_zero) == 0:
+                    continue
+                # 単価・金額のような大きな値ばかり（中央値が1500以上）の列は除外
+                if non_zero.median() > 1500:
+                    continue
+                best_qty_col = cand_col
+                break
 
-    combined = pd.concat(all_dfs, ignore_index=True)
-    combined = combined[combined["code_norm"].isin(valid_codes)]
-    return combined.groupby("code_norm")["qty"].sum().astype(int), loaded_file_count
+        if best_qty_col is not None:
+            for _, r_m in df_matched.iterrows():
+                c_norm = normalize_code(r_m.iloc[best_code_col])
+                q_v = to_num(r_m.iloc[best_qty_col])
+                if q_v != 0:
+                    all_records.append({"file": os.path.basename(fname), "code_norm": c_norm, "qty": q_v})
+
+    if not all_records:
+        return pd.Series(dtype=int), loaded_file_count, pd.DataFrame()
+
+    df_rec = pd.DataFrame(all_records)
+    summary_series = df_rec.groupby("code_norm")["qty"].sum().round().astype(int)
+    return summary_series, loaded_file_count, df_rec
 
 # ---------------------------------------------------------
 # ヘッダー ＆ アップローダー
@@ -716,13 +739,13 @@ with head_col1:
     st.markdown('<div class="app-header">📊 発注検討表 ＆ 弥生受注伝票システム（完全連動版）</div>', unsafe_allow_html=True)
 with head_col2:
     with st.expander("📂 売上CSV（今月売れ数）＆ 最新Excelの読込・更新", expanded=False):
-        up_sales = st.file_uploader("🔥 今月の売上CSV（ yayoi_xxxx.csv をまとめて選択・ドロップ）", type=["csv"], accept_multiple_files=True, key="up_s")
+        up_sales = st.file_uploader("🔥 今月の売上CSV（ yayoi_xxxx.csv をすべて選択してドロップ）", type=["csv"], accept_multiple_files=True, key="up_s")
         u_c1, u_c2 = st.columns(2)
         up_main = u_c1.file_uploader("📋 発注検討表.xlsx", type=["xlsx"], key="up_m")
         up_yayoi = u_c2.file_uploader("📑 弥生確保リスト.xlsx", type=["xlsx"], key="up_y")
         u_c3, u_c4 = st.columns(2)
-        up_comp = u_c3.file_uploader("🏢 弥生会社名.xlsx", type=["xlsx"], key="up_comp")
-        up_item = u_c4.file_uploader("📦 弥生商品番号.xlsx", type=["xlsx"], key="up_item")
+        up_comp = u_c3.file_uploader("🏢 弥生会社名.xlsx (342社内蔵済)", type=["xlsx"], key="up_comp")
+        up_item = u_c4.file_uploader("📦 弥生商品番号.xlsx (1312点内蔵済)", type=["xlsx"], key="up_item")
         if st.button("🔄 最新状態に再読み込み", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
@@ -741,15 +764,14 @@ if df_main.empty:
     st.error("⚠️ 『発注検討表.xlsx』が見つかりません。右上の「📂 売上CSV ＆ 最新Excelの読込・更新」から『発注検討表.xlsx』をアップロードしてください。")
     st.stop()
 
-# 商品コード → U列倉庫・商品名のマッピング辞書
+# 商品コード → U列倉庫・商品名のマッピング辞書（空白は空白のまま保持）
 item_wh_map = {}
 item_name_map = {}
 for it in master_items:
     c_norm = normalize_code(it["code"])
-    raw_wh = it.get("wh", "")
-    wh_clean = raw_wh if raw_wh in ("青山", "名古屋", "共通") else ""
-    item_wh_map[c_norm] = wh_clean
-    item_wh_map[it["code"]] = wh_clean
+    raw_wh = clean_str(it.get("wh", ""))
+    item_wh_map[c_norm] = raw_wh
+    item_wh_map[it["code"]] = raw_wh
     item_name_map[c_norm] = it["name"]
     item_name_map[it["code"]] = it["name"]
 
@@ -765,8 +787,9 @@ for _, r in df_main.iterrows():
         item_wh_map[ic_n] = wh_def
         item_name_map[ic] = clean_str(r["商品区分"])
 
-valid_norm_tuple = tuple(df_main["品番_正規化"].unique())
-sales_series, sales_file_cnt = load_sales_csvs(up_sales, valid_norm_tuple)
+# 売上CSVの集計・マッピング（弥生商品番号.xlsxの全1312コード＋発注検討表の全コードを対象）
+all_valid_norm_codes = tuple(set(df_main["品番_正規化"].unique()) | set(item_name_map.keys()))
+sales_series, sales_file_cnt, df_sales_detail = load_sales_csvs(up_sales, all_valid_norm_codes)
 if not sales_series.empty:
     df_main["今月売れ数"] = df_main["品番_正規化"].map(sales_series).fillna(0).astype(int)
 else:
@@ -820,11 +843,12 @@ if not df_hist.empty:
         hist_dict[code] = grp[["会議日", "決定事項", "シート"]].to_dict(orient="records")
 
 total_sales_qty = int(m_df["今月売れ数"].sum())
+asc001_qty = int(sales_series.get("ASC-001", 0)) if not sales_series.empty else 0
 st.caption(
     f"✅ **マスタ完全連動中** ｜ 発注検討表: **{len(m_df):,}** 商品 ｜ "
     f"得意先マスタ: **{len(master_comps):,}** 社 ｜ "
     f"商品マスタ: **{len(master_items):,}** 点（U列倉庫連動） ｜ "
-    f"🔥 今月売れ数合計: **{total_sales_qty:,}** 個 （読込CSV: {sales_file_cnt} 件）"
+    f"🔥 今月売れ数合計: **{total_sales_qty:,}** 個 （読込CSV: {sales_file_cnt} 件 ／ ASC-001集計値: **{asc001_qty:,}** 個）"
 )
 
 # ---------------------------------------------------------
@@ -833,8 +857,8 @@ st.caption(
 tab1, tab2, tab3, tab4 = st.tabs([
     f"📋 1. 発注検討表（全 {len(m_df):,} 件・特大ポップアップ）",
     "🏢 2. 会社（得意先）別・受注番号別 確保リスト（特大ポップアップ）",
-    "💻 3. 弥生受注伝票（新規白紙・U列倉庫列・最大100行・ポップアップ検索）",
-    "🕒 4. 入荷予定・過去の会議決定履歴"
+    "💻 3. 弥生受注伝票（コード・商品名・倉庫名 分離版 ／ 最大100行）",
+    "🕒 4. 入荷予定・会議履歴 ＆ 売上CSV検証"
 ])
 
 # =========================================================
@@ -857,7 +881,7 @@ with tab1:
     )
     center_opt = ["すべて"] + sorted([x for x in m_df["商品センター"].unique() if x])
     sel_center = f_col2.selectbox("商品センター", center_opt)
-    search_kw = f_col3.text_input("🔍 品番・商品名・会社名・決定事項で検索", placeholder="例: AHL-2203 / ライト / 丸藤")
+    search_kw = f_col3.text_input("🔍 品番・商品名・会社名・決定事項で検索", placeholder="例: ASC-001 / AHL-2203 / ライト / 丸藤")
 
     v_df = m_df.copy()
     if filter_mode == "🚨 要発注（発注検討フラグがマイナスのみ）":
@@ -909,7 +933,7 @@ with tab1:
             cursor: pointer; border: none; background: #2563eb; color: #fff;
         }}
         .btn-download:hover {{ background: #1d4ed8; }}
-        .table-wrap {{ width: 100%; height: 590px; overflow: auto; border: 1px solid #94a3b8; position: relative; }}
+        .table-wrap {{ width: 100%; height: 610px; overflow: auto; border: 1px solid #94a3b8; position: relative; }}
         table {{ border-collapse: separate; border-spacing: 0; width: max-content; min-width: 100%; }}
         th, td {{ border-right: 1px solid #94a3b8; border-bottom: 1px solid #94a3b8; padding: 3px 6px; font-size: 12.5px; height: 30px; }}
         thead th {{
@@ -948,35 +972,35 @@ with tab1:
         .click-link {{ color: #0284c7; font-weight: bold; text-decoration: underline; cursor: pointer; display: block; width: 100%; }}
         .cell-input {{ width: 100%; height: 23px; border: 1px solid #94a3b8; border-radius: 2px; padding: 1px 4px; font-size: 12px; background: rgba(255,255,255,0.9); }}
 
-        /* ポップアップを特大化（画面幅98%、最大1600px、高さ95vh） */
+        /* 特大ポップアップウィンドウ（2倍サイズ・大文字仕様） */
         .modal-overlay {{
             display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(15, 23, 42, 0.65); z-index: 9999; justify-content: center; align-items: center;
+            background: rgba(15, 23, 42, 0.7); z-index: 9999; justify-content: center; align-items: center;
         }}
         .modal-window {{
-            background: #fff; width: 98%; max-width: 1600px; height: 95vh; border-radius: 10px;
-            box-shadow: 0 25px 35px -5px rgba(0,0,0,0.4); display: flex; flex-direction: column; overflow: hidden; border: 3px solid #1e40af;
+            background: #fff; width: 99%; max-width: 1750px; height: 96vh; border-radius: 10px;
+            box-shadow: 0 25px 40px -5px rgba(0,0,0,0.45); display: flex; flex-direction: column; overflow: hidden; border: 3px solid #1e40af;
         }}
-        .modal-header {{ background: #1e3a8a; color: #fff; padding: 14px 22px; display: flex; justify-content: space-between; align-items: center; }}
-        .modal-title {{ font-size: 18px; font-weight: bold; }}
-        .modal-close {{ background: #ef4444; color: #fff; border: none; border-radius: 5px; padding: 7px 18px; font-size: 14px; font-weight: bold; cursor: pointer; }}
-        .modal-body {{ padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; flex: 1; }}
-        .summary-bar {{ display: flex; gap: 20px; flex-wrap: wrap; background: #f1f5f9; padding: 12px 18px; border-radius: 8px; border-left: 6px solid #2563eb; font-size: 14px; }}
+        .modal-header {{ background: #1e3a8a; color: #fff; padding: 16px 24px; display: flex; justify-content: space-between; align-items: center; }}
+        .modal-title {{ font-size: 20px; font-weight: bold; }}
+        .modal-close {{ background: #ef4444; color: #fff; border: none; border-radius: 6px; padding: 8px 22px; font-size: 15px; font-weight: bold; cursor: pointer; }}
+        .modal-body {{ padding: 22px; overflow-y: auto; display: flex; flex-direction: column; gap: 18px; flex: 1; }}
+        .summary-bar {{ display: flex; gap: 24px; flex-wrap: wrap; background: #f1f5f9; padding: 14px 20px; border-radius: 8px; border-left: 6px solid #2563eb; font-size: 15.5px; }}
         .summary-item {{ font-weight: bold; color: #1e293b; }}
-        .summary-item span {{ color: #0284c7; font-size: 16px; margin-left: 4px; }}
-        .quick-edit-box {{ background: #fffbeb; border: 1.5px solid #fde68a; padding: 12px 16px; border-radius: 8px; display: flex; flex-direction: column; gap: 10px; }}
-        .stamp-btn {{ background: #e2e8f0; border: 1px solid #94a3b8; border-radius: 4px; padding: 4px 10px; font-size: 13px; cursor: pointer; font-weight: bold; }}
-        .modal-grid {{ display: grid; grid-template-columns: 3.5fr 1.5fr; gap: 18px; }}
+        .summary-item span {{ color: #0284c7; font-size: 18px; margin-left: 5px; }}
+        .quick-edit-box {{ background: #fffbeb; border: 2px solid #fde68a; padding: 14px 18px; border-radius: 8px; display: flex; flex-direction: column; gap: 12px; }}
+        .stamp-btn {{ background: #e2e8f0; border: 1px solid #94a3b8; border-radius: 5px; padding: 5px 12px; font-size: 14px; cursor: pointer; font-weight: bold; }}
+        .modal-grid {{ display: grid; grid-template-columns: 3.5fr 1.5fr; gap: 20px; }}
         .sub-table {{ width: 100%; border-collapse: collapse; }}
-        .sub-table th {{ background: #e2e8f0; color: #1e293b; padding: 8px 10px; font-size: 13.5px; height: auto; position: static; border: 1px solid #cbd5e1; }}
-        .sub-table td {{ padding: 8px 10px; font-size: 13.5px; height: auto; border: 1px solid #cbd5e1; }}
-        .sec-title {{ font-size: 15px; font-weight: bold; color: #1e3a8a; margin-bottom: 8px; border-bottom: 2px solid #93c5fd; padding-bottom: 4px; }}
+        .sub-table th {{ background: #e2e8f0; color: #1e293b; padding: 10px 12px; font-size: 14.5px; height: auto; position: static; border: 1px solid #cbd5e1; }}
+        .sub-table td {{ padding: 10px 12px; font-size: 14.5px; height: auto; border: 1px solid #cbd5e1; }}
+        .sec-title {{ font-size: 16.5px; font-weight: bold; color: #1e3a8a; margin-bottom: 8px; border-bottom: 2px solid #93c5fd; padding-bottom: 4px; }}
     </style>
     </head>
     <body>
     <div class="toolbar">
         <div class="toolbar-info">表示件数: <span id="row-count">0</span> 件</div>
-        <div class="toolbar-hint">💡 品番・在庫確保(弥生)クリックで特大詳細ポップアップが開きます！</div>
+        <div class="toolbar-hint">💡 品番・在庫確保(弥生)クリックで特大ポップアップが開きます！</div>
         <button class="btn-download" onclick="exportEditedCSV()">📥 編集内容を反映したCSV出力</button>
     </div>
     <div class="table-wrap">
@@ -1019,7 +1043,7 @@ with tab1:
             <div class="modal-body">
                 <div class="summary-bar" id="modal-summary"></div>
                 <div class="quick-edit-box">
-                    <div style="font-size:13.5px; font-weight:bold; color:#92400e; display:flex; justify-content:space-between;">
+                    <div style="font-size:14.5px; font-weight:bold; color:#92400e; display:flex; justify-content:space-between;">
                         <span>✏️ この場で決定事項・入荷予定日を入力（表にもリアルタイム連動）</span>
                         <span>
                             スタンプ:
@@ -1030,14 +1054,14 @@ with tab1:
                         </span>
                     </div>
                     <div style="display:flex; gap:12px; align-items:center;">
-                        <label style="font-size:13px; font-weight:bold;">前回:</label>
-                        <input type="text" id="modal-view-prev" class="cell-input" style="width:180px; height:28px; background:#fef08a; font-size:13px;" readonly>
-                        <label style="font-size:13px; font-weight:bold;">入荷予定日:</label>
-                        <input type="text" id="modal-input-ndate" class="cell-input" style="width:130px; height:28px; font-size:13px;" oninput="syncFromModal()">
-                        <label style="font-size:13px; font-weight:bold;">決定事項:</label>
-                        <input type="text" id="modal-input-dec" class="cell-input" style="flex:1; height:28px; font-size:13px;" oninput="syncFromModal()">
-                        <label style="font-size:13px; font-weight:bold;">発注日:</label>
-                        <input type="text" id="modal-input-odate" class="cell-input" style="width:120px; height:28px; font-size:13px;" oninput="syncFromModal()">
+                        <label style="font-size:14px; font-weight:bold;">前回:</label>
+                        <input type="text" id="modal-view-prev" class="cell-input" style="width:200px; height:32px; background:#fef08a; font-size:14px;" readonly>
+                        <label style="font-size:14px; font-weight:bold;">入荷予定日:</label>
+                        <input type="text" id="modal-input-ndate" class="cell-input" style="width:140px; height:32px; font-size:14px;" oninput="syncFromModal()">
+                        <label style="font-size:14px; font-weight:bold;">決定事項:</label>
+                        <input type="text" id="modal-input-dec" class="cell-input" style="flex:1; height:32px; font-size:14px;" oninput="syncFromModal()">
+                        <label style="font-size:14px; font-weight:bold;">発注日:</label>
+                        <input type="text" id="modal-input-odate" class="cell-input" style="width:130px; height:32px; font-size:14px;" oninput="syncFromModal()">
                     </div>
                 </div>
                 <div class="modal-grid">
@@ -1148,14 +1172,14 @@ with tab1:
             const rawYList = yayoiMap[codeNorm] || [];
             const yList = [...rawYList].sort((a, b) => (b["受注日"] || "").localeCompare(a["受注日"] || ""));
             if (yList.length === 0) {{
-                document.getElementById("modal-yayoi-area").innerHTML = `<div style="padding:14px; font-size:13.5px; color:#64748b; background:#f8fafc;">現在、弥生確保リストに『${{code}}』の受注残データはありません。</div>`;
+                document.getElementById("modal-yayoi-area").innerHTML = `<div style="padding:16px; font-size:14.5px; color:#64748b; background:#f8fafc;">現在、弥生確保リストに『${{code}}』の受注残データはありません。</div>`;
             }} else {{
                 let yHtml = `<table class="sub-table"><thead><tr><th>受注番号</th><th>得意先名</th><th>受注残数</th><th>受注日</th><th>納入期日</th><th>倉庫名</th><th>担当者</th><th>備考</th></tr></thead><tbody>`;
                 yList.forEach(y => {{
                     yHtml += `<tr>
                         <td style="text-align:center; font-weight:bold;">${{y["受注番号"] || ""}}</td>
                         <td style="font-weight:bold;">${{y["得意先名"]}}</td>
-                        <td style="text-align:right; font-weight:bold; color:#0284c7;">${{fmtNum(y["受注残数"])}}</td>
+                        <td style="text-align:right; font-weight:bold; color:#0284c7; font-size:15.5px;">${{fmtNum(y["受注残数"])}}</td>
                         <td style="text-align:center;">${{y["受注日"]}}</td>
                         <td style="text-align:center;">${{y["納入期日"]}}</td>
                         <td style="text-align:center; font-weight:bold;">${{y["倉庫名"] || ""}}</td>
@@ -1169,9 +1193,9 @@ with tab1:
 
             const hList = histMap[code] || [];
             if (hList.length === 0) {{
-                document.getElementById("modal-hist-area").innerHTML = `<div style="padding:14px; font-size:13.5px; color:#64748b; background:#f8fafc;">過去の会議決定履歴はありません。</div>`;
+                document.getElementById("modal-hist-area").innerHTML = `<div style="padding:16px; font-size:14.5px; color:#64748b; background:#f8fafc;">過去の会議決定履歴はありません。</div>`;
             }} else {{
-                let hHtml = `<table class="sub-table"><thead><tr><th style="width:100px;">会議日</th><th>決定事項</th></tr></thead><tbody>`;
+                let hHtml = `<table class="sub-table"><thead><tr><th style="width:110px;">会議日</th><th>決定事項</th></tr></thead><tbody>`;
                 hList.forEach(h => {{
                     hHtml += `<tr><td style="text-align:center; font-weight:bold;">${{h["会議日"]}}</td><td style="font-weight:bold;">${{h["決定事項"]}}</td></tr>`;
                 }});
@@ -1222,7 +1246,7 @@ with tab1:
     </body>
     </html>
     """
-    components.html(html_tab1, height=640, scrolling=False)
+    components.html(html_tab1, height=670, scrolling=False)
 
 # =========================================================
 # タブ2：会社（得意先）別 確保リスト（特大ポップアップウィンドウ 約2倍）
@@ -1314,38 +1338,38 @@ with tab2:
             }}
             .toolbar-info {{ font-size: 13.5px; color: #1e293b; font-weight: bold; }}
             .toolbar-hint {{ font-size: 12.5px; color: #0369a1; background: #e0f2fe; padding: 4px 12px; border-radius: 4px; font-weight: bold; }}
-            .table-wrap {{ width: 100%; height: 550px; overflow: auto; border: 1px solid #94a3b8; }}
+            .table-wrap {{ width: 100%; height: 580px; overflow: auto; border: 1px solid #94a3b8; }}
             table {{ border-collapse: separate; border-spacing: 0; width: 100%; }}
-            th, td {{ border-right: 1px solid #cbd5e1; border-bottom: 1px solid #cbd5e1; padding: 6px 10px; font-size: 13px; }}
+            th, td {{ border-right: 1px solid #cbd5e1; border-bottom: 1px solid #cbd5e1; padding: 7px 10px; font-size: 13.5px; }}
             thead th {{
                 position: sticky; top: 0; background: #1e3a8a; color: #fff;
-                font-weight: bold; text-align: center; height: 38px; z-index: 10;
+                font-weight: bold; text-align: center; height: 40px; z-index: 10;
             }}
             tbody tr:nth-child(even) {{ background: #f8fafc; }}
             tbody tr:hover {{ background: #e0f2fe; cursor: pointer; }}
             .click-link {{ color: #0284c7; font-weight: bold; text-decoration: underline; cursor: pointer; }}
             .click-link:hover {{ color: #1d4ed8; }}
 
-            /* 特大ポップアップ（横幅98%、最大1600px、高さ95vh） */
+            /* 特大ポップアップウィンドウ */
             .modal-overlay {{
                 display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-                background: rgba(15, 23, 42, 0.65); z-index: 9999; justify-content: center; align-items: center;
+                background: rgba(15, 23, 42, 0.7); z-index: 9999; justify-content: center; align-items: center;
             }}
             .modal-window {{
-                background: #fff; width: 98%; max-width: 1600px; height: 95vh; border-radius: 10px;
-                box-shadow: 0 25px 35px -5px rgba(0,0,0,0.4); display: flex; flex-direction: column; overflow: hidden; border: 3px solid #1e40af;
+                background: #fff; width: 99%; max-width: 1750px; height: 96vh; border-radius: 10px;
+                box-shadow: 0 25px 40px -5px rgba(0,0,0,0.45); display: flex; flex-direction: column; overflow: hidden; border: 3px solid #1e40af;
             }}
-            .modal-header {{ background: #1e3a8a; color: #fff; padding: 14px 22px; display: flex; justify-content: space-between; align-items: center; }}
-            .modal-title {{ font-size: 18px; font-weight: bold; }}
-            .modal-close {{ background: #ef4444; color: #fff; border: none; border-radius: 5px; padding: 7px 18px; font-size: 14px; font-weight: bold; cursor: pointer; }}
-            .modal-body {{ padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; flex: 1; }}
-            .summary-bar {{ display: flex; gap: 20px; flex-wrap: wrap; background: #f1f5f9; padding: 12px 18px; border-radius: 8px; border-left: 6px solid #2563eb; font-size: 14px; }}
+            .modal-header {{ background: #1e3a8a; color: #fff; padding: 16px 24px; display: flex; justify-content: space-between; align-items: center; }}
+            .modal-title {{ font-size: 20px; font-weight: bold; }}
+            .modal-close {{ background: #ef4444; color: #fff; border: none; border-radius: 6px; padding: 8px 22px; font-size: 15px; font-weight: bold; cursor: pointer; }}
+            .modal-body {{ padding: 22px; overflow-y: auto; display: flex; flex-direction: column; gap: 18px; flex: 1; }}
+            .summary-bar {{ display: flex; gap: 24px; flex-wrap: wrap; background: #f1f5f9; padding: 14px 20px; border-radius: 8px; border-left: 6px solid #2563eb; font-size: 15.5px; }}
             .summary-item {{ font-weight: bold; color: #1e293b; }}
-            .summary-item span {{ color: #0284c7; font-size: 16px; margin-left: 4px; }}
+            .summary-item span {{ color: #0284c7; font-size: 18px; margin-left: 5px; }}
             .sub-table {{ width: 100%; border-collapse: collapse; }}
-            .sub-table th {{ background: #e2e8f0; color: #1e293b; padding: 8px 10px; font-size: 13.5px; border: 1px solid #cbd5e1; position: static; height: auto; }}
-            .sub-table td {{ padding: 8px 10px; font-size: 13.5px; border: 1px solid #cbd5e1; }}
-            .sec-title {{ font-size: 15px; font-weight: bold; color: #1e3a8a; border-bottom: 2px solid #93c5fd; padding-bottom: 4px; }}
+            .sub-table th {{ background: #e2e8f0; color: #1e293b; padding: 10px 12px; font-size: 14.5px; border: 1px solid #cbd5e1; position: static; height: auto; }}
+            .sub-table td {{ padding: 10px 12px; font-size: 14.5px; border: 1px solid #cbd5e1; }}
+            .sec-title {{ font-size: 16.5px; font-weight: bold; color: #1e3a8a; border-bottom: 2px solid #93c5fd; padding-bottom: 4px; }}
         </style>
         </head>
         <body>
@@ -1432,15 +1456,15 @@ with tab2:
                 `;
 
                 let tHtml = `<table class="sub-table"><thead><tr>
-                    <th style="width:50px;">No</th>
-                    <th style="width:140px;">商品コード</th>
-                    <th>商品名 / 区分</th>
-                    <th style="width:100px;">受注残数</th>
-                    <th style="width:90px;">倉庫名(U列)</th>
-                    <th style="width:110px;">納入期日</th>
-                    <th style="width:95px;">ロジ在庫</th>
-                    <th style="width:95px;">フリー在庫</th>
-                    <th style="width:110px;">入荷予定日</th>
+                    <th style="width:55px;">No</th>
+                    <th style="width:150px;">商品コード</th>
+                    <th>商品名</th>
+                    <th style="width:110px;">受注残数</th>
+                    <th style="width:100px;">倉庫名</th>
+                    <th style="width:115px;">納入期日</th>
+                    <th style="width:105px;">ロジ在庫</th>
+                    <th style="width:105px;">フリー在庫</th>
+                    <th style="width:115px;">入荷予定日</th>
                     <th>備考 / 決定事項</th>
                 </tr></thead><tbody>`;
 
@@ -1449,7 +1473,7 @@ with tab2:
                         <td style="text-align:center;">${{i + 1}}</td>
                         <td style="font-weight:bold; color:#0284c7;">${{d["商品コード"]}}</td>
                         <td style="font-weight:bold;">${{d["商品名"]}}</td>
-                        <td style="text-align:right; font-weight:bold; color:#be123c; background:#fff1f2;">${{fmtNum(d["受注残数"])}}</td>
+                        <td style="text-align:right; font-weight:bold; color:#be123c; background:#fff1f2; font-size:15.5px;">${{fmtNum(d["受注残数"])}}</td>
                         <td style="text-align:center; font-weight:bold;">${{d["倉庫名"]}}</td>
                         <td style="text-align:center;">${{d["納入期日"]}}</td>
                         <td style="text-align:right; background:#ecfeff;">${{fmtNum(d["ロジ在庫"])}}</td>
@@ -1471,10 +1495,10 @@ with tab2:
         </body>
         </html>
         """
-        components.html(html_tab2, height=620, scrolling=False)
+        components.html(html_tab2, height=650, scrolling=False)
 
 # =========================================================
-# タブ3：弥生受注伝票（新規白紙・U列倉庫列・最大100行・ポップアップ検索）
+# タブ3：弥生受注伝票（商品コード・商品名・倉庫名を完全分離 ＆ リアルタイム自動入力）
 # =========================================================
 with tab3:
     max_seq = 0
@@ -1489,11 +1513,10 @@ with tab3:
             pass
     next_order_no_str = f"{max_seq + 1:08d}"
 
-    # 得意先プルダウン（先頭は白紙 ""）
+    # 得意先プルダウン（全342社対応・先頭は白紙 ""）
     comp_select_list = [""] + [f"{c['name']}" + (f" （{c['code']}）" if c["code"] else "") for c in master_comps]
-    # 商品プルダウン（先頭は白紙 ""、純粋に「コード ｜ 名称」のみ表示）
-    item_select_list = [""] + [f"{it['code']} ｜ {it['name']}" for it in master_items]
-    code_to_item_label = {it["code"]: f"{it['code']} ｜ {it['name']}" for it in master_items}
+    # 商品コードプルダウン（全1,312点対応・B列のコードのみ格納）
+    item_code_list = [""] + [it["code"] for it in master_items]
 
     def create_blank_slip(order_no_val):
         return {
@@ -1505,7 +1528,7 @@ with tab3:
             "summary": "",
             "version": int(time.time() * 1000) % 1000000,
             "grid_df": pd.DataFrame([
-                {"商品コード / 商品名": "", "倉庫名": "", "受注残数(数量)": 0, "備考": ""}
+                {"商品コード": "", "商品名": "", "倉庫名": "", "受注残数(数量)": 0, "備考": ""}
                 for _ in range(10)
             ])
         }
@@ -1566,7 +1589,7 @@ with tab3:
             unsafe_allow_html=True
         )
         st.dataframe(
-            target_lines[["商品コード", "商品名/摘要", "受注残数", "倉庫名", "納入期日", "備考"]],
+            target_lines[["商品コード", "商品名/摘要", "倉庫名", "受注残数", "納入期日", "備考"]],
             hide_index=True,
             use_container_width=True,
             height=170
@@ -1577,18 +1600,19 @@ with tab3:
             grid_rows = []
             for _, lr in target_lines.iterrows():
                 c_code = clean_str(lr["商品コード"])
+                if c_code and c_code not in item_code_list:
+                    item_code_list.append(c_code)
+                p_name = item_name_map.get(normalize_code(c_code), clean_str(lr.get("商品名/摘要", "")))
                 u_wh = item_wh_map.get(normalize_code(c_code), clean_str(lr.get("倉庫名", "")))
-                lbl = code_to_item_label.get(c_code, f"{c_code} ｜ {clean_str(lr.get('商品名/摘要', ''))}")
-                if lbl not in item_select_list:
-                    item_select_list.append(lbl)
                 grid_rows.append({
-                    "商品コード / 商品名": lbl,
+                    "商品コード": c_code,
+                    "商品名": p_name,
                     "倉庫名": u_wh,
                     "受注残数(数量)": int(lr["受注残数"]),
                     "備考": clean_str(lr.get("備考", ""))
                 })
             while len(grid_rows) < 10:
-                grid_rows.append({"商品コード / 商品名": "", "倉庫名": "", "受注残数(数量)": 0, "備考": ""})
+                grid_rows.append({"商品コード": "", "商品名": "", "倉庫名": "", "受注残数(数量)": 0, "備考": ""})
 
             matched_comp = next((c for c in comp_select_list if c and c.startswith(clean_str(first_r["得意先名"]))), clean_str(first_r["得意先名"]))
             try:
@@ -1631,13 +1655,13 @@ with tab3:
         if len(cur_df) < 100:
             add_cnt = min(10, 100 - len(cur_df))
             extra_df = pd.DataFrame([
-                {"商品コード / 商品名": "", "倉庫名": "", "受注残数(数量)": 0, "備考": ""}
+                {"商品コード": "", "商品名": "", "倉庫名": "", "受注残数(数量)": 0, "備考": ""}
                 for _ in range(add_cnt)
             ])
             slip_state["grid_df"] = pd.concat([cur_df, extra_df], ignore_index=True)
             st.rerun()
 
-    st.markdown('<div class="yayoi-slip-header">💻 受注伝票入力（新規は白紙 ／ 商品コードを選ぶと「倉庫名」列に青山・名古屋が自動判定されます）</div>', unsafe_allow_html=True)
+    st.markdown('<div class="yayoi-slip-header">💻 受注伝票入力（商品コードを選ぶと「商品名(C列)」と「倉庫名(U列)」が自動で入ります）</div>', unsafe_allow_html=True)
     st.markdown('<div class="yayoi-slip-body">', unsafe_allow_html=True)
 
     h1, h2, h3, h4 = st.columns([1.4, 1.4, 1.4, 1.8])
@@ -1671,34 +1695,32 @@ with tab3:
         key=f"sum_{v_key}"
     )
 
-    st.markdown(f"##### 📝 内訳明細（全 {len(master_items):,} 商品対応 ／ 商品コードを選ぶとU列の倉庫名が自動で入ります）")
-
-    # 現在のgrid_df内の商品コードに基づいて倉庫名列を自動更新
-    for idx_row in range(len(slip_state["grid_df"])):
-        item_val = clean_str(slip_state["grid_df"].iloc[idx_row].get("商品コード / 商品名", ""))
-        if item_val:
-            p_code = item_val.split(" ｜ ")[0].strip()
-            wh_val = item_wh_map.get(normalize_code(p_code), item_wh_map.get(p_code, ""))
-            slip_state["grid_df"].iloc[idx_row, 1] = wh_val
+    st.markdown(f"##### 📝 内訳明細（全 {len(master_items):,} 商品対応 ／ 「商品コード」列を選択すると隣の「商品名」「倉庫名」が自動表示されます）")
 
     raw_edited_grid = st.data_editor(
         slip_state["grid_df"],
         num_rows="dynamic",
         use_container_width=True,
-        height=340,
+        height=350,
         key=f"yayoi_grid_{v_key}",
         column_config={
-            "商品コード / 商品名": st.column_config.SelectboxColumn(
-                f"商品コード / 商品名（弥生商品番号.xlsx 全 {len(master_items):,} 点）",
-                options=item_select_list,
-                width="large",
-                help="クリックして品番または商品名を入力すると絞り込めます"
+            "商品コード": st.column_config.SelectboxColumn(
+                f"商品コード (B列: 全 {len(master_items):,} 点)",
+                options=item_code_list,
+                width="medium",
+                help="クリックして商品コードを入力すると絞り込めます"
             ),
-            "倉庫名": st.column_config.SelectboxColumn(
-                "倉庫名（U列から自動判定）",
-                options=["", "青山", "名古屋", "共通"],
+            "商品名": st.column_config.TextColumn(
+                "商品名 (C列自動)",
+                width="large",
+                disabled=True,
+                help="商品コードを選ぶと自動で商品名が入ります"
+            ),
+            "倉庫名": st.column_config.TextColumn(
+                "倉庫名 (U列自動)",
                 width="small",
-                help="商品を選ぶと自動で青山または名古屋が振り分けられます（手動変更も可能）"
+                disabled=True,
+                help="弥生商品番号のU列（青山・名古屋・共通・空白）が自動で入ります"
             ),
             "受注残数(数量)": st.column_config.NumberColumn(
                 "受注残数 (数量)",
@@ -1715,27 +1737,38 @@ with tab3:
         }
     )
 
-    preview_rows = []
-    for idx_r, r_g in raw_edited_grid.iterrows():
-        sel_p = clean_str(r_g.get("商品コード / 商品名", ""))
+    # 商品コードが変更されたら即座に「商品名」と「倉庫名」のセルを埋めて画面に反映する
+    need_sync = False
+    synced_rows = []
+    for _, r_g in raw_edited_grid.iterrows():
+        c_code = clean_str(r_g.get("商品コード", ""))
+        cur_name = clean_str(r_g.get("商品名", ""))
+        cur_wh = clean_str(r_g.get("倉庫名", ""))
         qty_v = int(to_num(r_g.get("受注残数(数量)", 0)))
-        if sel_p:
-            p_code = sel_p.split(" ｜ ")[0].strip()
-            user_wh = clean_str(r_g.get("倉庫名", ""))
-            auto_wh = user_wh if user_wh else item_wh_map.get(normalize_code(p_code), item_wh_map.get(p_code, ""))
-            p_name = item_name_map.get(normalize_code(p_code), item_name_map.get(p_code, ""))
-            preview_rows.append({
-                "行": idx_r + 1,
-                "商品コード": p_code,
-                "商品名": p_name,
-                "倉庫名": auto_wh,
-                "受注残数(数量)": qty_v,
-                "備考": clean_str(r_g.get("備考", "")) or clean_str(in_summary)
-            })
+        note_v = clean_str(r_g.get("備考", ""))
 
-    if preview_rows:
-        st.caption("✅ **入力中の明細 ＆ 倉庫（青山／名古屋）確認プレビュー**（※下の「💾 この伝票を登録・上書き保存する」を押すまで登録されません）")
-        st.dataframe(pd.DataFrame(preview_rows), hide_index=True, use_container_width=True)
+        if c_code:
+            expected_name = item_name_map.get(normalize_code(c_code), item_name_map.get(c_code, ""))
+            expected_wh = item_wh_map.get(normalize_code(c_code), item_wh_map.get(c_code, ""))
+        else:
+            expected_name = ""
+            expected_wh = ""
+
+        if cur_name != expected_name or cur_wh != expected_wh:
+            need_sync = True
+
+        synced_rows.append({
+            "商品コード": c_code,
+            "商品名": expected_name,
+            "倉庫名": expected_wh,
+            "受注残数(数量)": qty_v,
+            "備考": note_v
+        })
+
+    if need_sync:
+        slip_state["grid_df"] = pd.DataFrame(synced_rows)
+        slip_state["version"] = int(time.time() * 1000) % 1000000
+        st.rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1753,13 +1786,11 @@ with tab3:
             for idx_r, row_g in raw_edited_grid.iterrows():
                 if idx_r >= 100:
                     break
-                sel_prod = clean_str(row_g.get("商品コード / 商品名", ""))
+                p_code = clean_str(row_g.get("商品コード", ""))
                 qty_v = int(to_num(row_g.get("受注残数(数量)", 0)))
-                if sel_prod and qty_v > 0:
-                    p_code = sel_prod.split(" ｜ ")[0].strip()
+                if p_code and qty_v > 0:
                     p_name = item_name_map.get(normalize_code(p_code), item_name_map.get(p_code, ""))
-                    user_wh = clean_str(row_g.get("倉庫名", ""))
-                    u_wh = user_wh if user_wh else item_wh_map.get(normalize_code(p_code), item_wh_map.get(p_code, ""))
+                    u_wh = item_wh_map.get(normalize_code(p_code), item_wh_map.get(p_code, ""))
                     valid_items.append({
                         "受注番号": clean_str(in_ono),
                         "得意先名": comp_clean,
@@ -1776,7 +1807,7 @@ with tab3:
                     })
 
             if not valid_items:
-                st.error("⚠️ 商品が選択され、かつ「受注残数(数量)」が1以上の行がありません。入力してから登録ボタンを押してください。")
+                st.error("⚠️ 商品コードが選択され、かつ「受注残数(数量)」が1以上の行がありません。入力してから登録ボタンを押してください。")
             else:
                 df_new_slip = pd.DataFrame(valid_items)
                 if os.path.exists(MANUAL_YAYOI_CSV):
@@ -1804,14 +1835,25 @@ with tab3:
             st.rerun()
 
 # =========================================================
-# タブ4：入荷予定・過去の会議決定履歴
+# タブ4：入荷予定・会議履歴 ＆ 売上CSV検証
 # =========================================================
 with tab4:
+    st.subheader("🔍 今月の売上CSV 品番別・ファイル別 集計明細チェック")
+    if df_sales_detail.empty:
+        st.info("現在、売上CSVが読み込まれていません。画面右上の「📂 売上CSV（今月売れ数）＆ 最新Excelの読込・更新」から yayoi_xxxx.csv をすべて選択して読み込んでください。")
+    else:
+        chk_c1, chk_c2 = st.columns([1, 2])
+        kw_sales_chk = chk_c1.text_input("品番で売上集計を検索（例: ASC-001）", value="ASC-001")
+        df_s_filt = df_sales_detail[df_sales_detail["code_norm"].str.contains(kw_sales_chk.strip().upper(), na=False)] if kw_sales_chk else df_sales_detail
+        chk_c2.metric(f"『{kw_sales_chk or '全商品'}』の集計売れ数 合計", f"{int(df_s_filt['qty'].sum()):,} 個", f"該当明細行数: {len(df_s_filt)} 行")
+        st.dataframe(df_s_filt, hide_index=True, use_container_width=True, height=220)
+
+    st.divider()
     ch1, ch2 = st.columns(2)
     with ch1:
         st.subheader("🚢 入荷予定あり・発注済みの商品一覧")
         inc = m_df[(m_df["入荷予定数_ロジザード"] > 0) | (m_df["発注日"] != "") | (m_df["入荷予定日_ロジザード"] != "")].copy()
-        st.dataframe(inc[["品番", "商品区分", "在庫数_ロジザード", "入荷予定数_ロジザード", "入荷予定日_ロジザード", "発注日", "前回決定事項", "決定事項"]], hide_index=True, use_container_width=True, height=500)
+        st.dataframe(inc[["品番", "商品区分", "在庫数_ロジザード", "入荷予定数_ロジザード", "入荷予定日_ロジザード", "発注日", "前回決定事項", "決定事項"]], hide_index=True, use_container_width=True, height=450)
     with ch2:
         st.subheader("📜 過去28回の会議シート 決定事項 全履歴")
         h_kw = st.text_input("品番・決定内容で検索", placeholder="例: 発注 / 様子見")
