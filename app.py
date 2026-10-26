@@ -53,6 +53,8 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 BASE_DIR = "."
+MAIN_EXCEL = os.path.join(BASE_DIR, "発注検討表.xlsx")
+YAYOI_EXCEL = os.path.join(BASE_DIR, "弥生確保リスト.xlsx")
 SAVE_CSV = os.path.join(BASE_DIR, "meeting_decisions_v8.csv")
 MANUAL_YAYOI_CSV = os.path.join(BASE_DIR, "yayoi_manual_additions.csv")
 
@@ -76,11 +78,11 @@ def to_num(val):
         return 0.0
 
 @st.cache_data
-def load_yayoi_data(uploaded_file):
+def load_yayoi_data():
     df = pd.DataFrame()
-    if uploaded_file is not None:
+    if os.path.exists(YAYOI_EXCEL):
         try:
-            df = pd.read_excel(uploaded_file, sheet_name=0, header=4)
+            df = pd.read_excel(YAYOI_EXCEL, sheet_name=0, header=4)
         except Exception:
             pass
     
@@ -149,18 +151,12 @@ def load_sales_csvs(uploaded_files):
     return sales_summary
 
 @st.cache_data
-def load_excel_master(uploaded_file):
-    if uploaded_file is None:
-        demo_items = [{
-            "No": 1, "商品センター": "伊賀", "品番": "APL-4312SBL", "商品区分": "ミニホイッスル付LEDアルミライト II",
-            "1課発注点": 270, "2課発注点": "", "在庫数_ロジザード": 612, "入荷予定数_ロジザード": 0, "入荷予定日_ロジザード": "",
-            "確保数_ロジザード": 680, "在庫確保_弥生": 300, "在庫確保_丸藤": 0, "確保数のズレ": 380, "入荷後のフリー在庫": 312,
-            "発注検討フラグ": 42, "在庫回転率": 10, "リンベル確保数": "", "前回決定事項": "様子見", "決定事項": "", "発注日": "", "NA行": False
-        }]
-        return pd.DataFrame(demo_items), pd.DataFrame(columns=["会議日", "シート", "品番", "決定事項"]), "前回決定事項"
+def load_excel_master():
+    if not os.path.exists(MAIN_EXCEL):
+        return pd.DataFrame(), pd.DataFrame(), "前回決定事項"
 
     try:
-        wb = openpyxl.load_workbook(uploaded_file, read_only=True, data_only=True)
+        wb = openpyxl.load_workbook(MAIN_EXCEL, read_only=True, data_only=True)
     except Exception:
         return pd.DataFrame(), pd.DataFrame(), "前回決定事項"
         
@@ -218,15 +214,13 @@ def load_excel_master(uploaded_file):
 
 head_col1, head_col2 = st.columns([3, 2])
 with head_col1:
-    st.markdown('<div class="app-header">📊 発注検討表（Web管理システム）</div>', unsafe_allow_html=True)
+    st.markdown('<div class="app-header">📊 発注検討表（Web管理システム・弥生連動版）</div>', unsafe_allow_html=True)
 with head_col2:
-    with st.expander("📂 【重要】データのアップロード（ここからExcelを選択）"):
-        up_main = st.file_uploader("① 発注検討表.xlsx をアップロード", type=["xlsx"], key="up_m")
-        up_yayoi = st.file_uploader("② 弥生確保リスト.xlsx をアップロード", type=["xlsx"], key="up_y")
-        up_sales = st.file_uploader("③ 売上CSV群（ yayoi_xxxx.csv ）", type=["csv"], accept_multiple_files=True, key="up_s")
+    with st.expander("📂 売上CSV読込（今月売れ数自動算出用）"):
+        up_sales = st.file_uploader("売上CSV群（ yayoi_xxxx.csv ）", type=["csv"], accept_multiple_files=True, key="up_s")
 
-df_main, df_hist, prev_col_title = load_excel_master(up_main)
-df_yayoi = load_yayoi_data(up_yayoi)
+df_main, df_hist, prev_col_title = load_excel_master()
+df_yayoi = load_yayoi_data()
 
 sales_series = load_sales_csvs(up_sales)
 if not sales_series.empty:
@@ -274,7 +268,7 @@ if not df_hist.empty:
 tab1, tab2, tab3, tab4 = st.tabs([
     "📋 1. 発注検討表（直接編集・クリックポップアップ）",
     "🏢 2. 会社（得意先）別 確保データ検索",
-    "➕ 3. 新規確保データの登録（弥生風フォーム）",
+    "💻 3. 受注伝票入力（弥生風・複数行一括登録）",
     "🕒 4. 入荷予定・過去の会議決定履歴"
 ])
 
@@ -626,7 +620,7 @@ with tab1:
         const histMap = {hist_json};
         let currentModalIdx = null;
 
-        const savedEdits = JSON.parse(localStorage.getItem("hattyu_edits_v1"] || "{{}}");
+        const savedEdits = JSON.parse(localStorage.getItem("hattyu_edits_v1") || "{{}}");
         tableData.forEach(r => {{
             if (savedEdits[r["品番"]]) {{
                 r["入荷予定日_ロジザード"] = savedEdits[r["品番"]].ndate ?? r["入荷予定日_ロジザード"];
@@ -871,14 +865,13 @@ with tab2:
                     st.markdown("##### 📈 選択した会社の月別 納入スケジュール（受注残数合計）")
                     st.bar_chart(monthly_sch)
 
-        # 存在しない列名エラー（KeyError）を防ぐため、安全な列のみを指定して表示
         display_cols = [c for c in ["得意先名", "商品コード", "商品名/摘要", "受注残数", "受注日", "納入期日", "備考", "倉庫名", "入荷予定日_ロジザード", "前回決定事項", "決定事項"] if c in yv_merged.columns]
         st.dataframe(yv_merged[display_cols], hide_index=True, use_container_width=True, height=450)
 
 with tab3:
     st.markdown("""
     <div class="yayoi-form-box">
-        <div class="yayoi-form-header">💻 受注伝票入力（弥生販売風・新規確保データの登録）</div>
+        <div class="yayoi-form-header">💻 受注伝票入力（弥生販売風・複数行明細の一括登録）</div>
     """, unsafe_allow_html=True)
     
     company_options = ["アマゾンベンダー（ホーム）", "株式会社オバタ", "丸藤", "トップ産業", "ら・でぃっしゅぼーや株式会社"]
@@ -887,7 +880,7 @@ with tab3:
 
     item_options = [f"{row['品番']} ｜ {row['商品区分']}" for _, row in df_main.iterrows()] if not df_main.empty else ["APL-4312SBL ｜ ミニホイッスル付LEDアルミライト II"]
 
-    with st.form("add_yayoi_form_yayoi_style"):
+    with st.form("yayoi_multi_form"):
         rand_suffix = random.randint(1000, 9999)
         next_order_no = f"WEB-{datetime.date.today().strftime('%Y%m%d')}-{rand_suffix}"
         
@@ -896,50 +889,61 @@ with tab3:
         add_date = f_h2.date_input("受注日", value=datetime.date.today())
         add_limit = f_h3.date_input("納入期日", value=datetime.date.today())
 
-        f_d1, f_d2, f_d3 = st.columns(3)
+        f_d1, f_d2 = st.columns(2)
         add_comp = f_d1.selectbox("得意先 (会社名)", options=company_options)
-        
-        selected_item_str = f_d2.selectbox("商品コード (品番 ｜ 商品名)", options=item_options)
-        add_code = selected_item_str.split(" ｜ ")[0].strip() if " ｜ " in selected_item_str else selected_item_str.strip()
-        
-        add_qty = f_d3.number_input("受注残数 (数量)", min_value=1, value=1)
-
-        f_e1, f_e2 = st.columns(2)
         staff_options = ["松平", "杉中", "田中", "鈴木", "佐藤"]
-        add_staff = f_e1.selectbox("担当者", options=staff_options)
-        add_memo = f_e2.text_input("摘要 / 備考", placeholder="例: コーポさっぽろ 12/3w")
+        add_staff = f_d2.selectbox("担当者", options=staff_options)
 
-        submitted = st.form_submit_button("💾 伝票を登録する（自動反映）", type="primary")
+        st.markdown("##### 📝 受注内訳明細（動画の弥生のように複数行入力できます）")
+        
+        # 3行分の明細入力欄を用意
+        rows_data = []
+        for i in range(1, 4):
+            cols = st.columns([2, 1, 2])
+            item_sel = cols[0].selectbox(f"第{i}行：商品コード", options=["(選択なし)"] + item_options, key=f"item_{i}")
+            qty_val = cols[1].number_input(f"第{i}行：数量", min_value=0, value=0, key=f"qty_{i}")
+            memo_val = cols[2].text_input(f"第{i}行：備考 / 摘要", key=f"memo_{i}")
+            rows_data.append({"item": item_sel, "qty": qty_val, "memo": memo_val})
+
+        submitted = st.form_submit_button("💾 伝票の内容を一括登録する", type="primary")
         if submitted:
-            if not add_comp or not add_code:
-                st.error("⚠️ 「得意先」と「商品コード」は必須です。")
+            if not add_comp:
+                st.error("⚠️ 「得意先」を選択してください。")
             else:
-                new_row = {
-                    "受注番号": next_order_no,
-                    "得意先名": str(add_comp).strip(),
-                    "商品コード": str(add_code).strip(),
-                    "受注残数": int(add_qty),
-                    "数量": int(add_qty),
-                    "受注日": add_date.strftime("%Y-%m-%d"),
-                    "納入期日": add_limit.strftime("%Y-%m-%d"),
-                    "受注日_dt": pd.to_datetime(add_date),
-                    "納入期日_dt": pd.to_datetime(add_limit),
-                    "備考": str(add_memo).strip(),
-                    "倉庫名": "WEB入力",
-                    "商品名/摘要": "",
-                    "担当者名": str(add_staff).strip()
-                }
-                df_new = pd.DataFrame([new_row])
-                if os.path.exists(MANUAL_YAYOI_CSV):
-                    df_existing = pd.read_csv(MANUAL_YAYOI_CSV)
-                    df_combined_man = pd.concat([df_existing, df_new], ignore_index=True)
-                else:
-                    df_combined_man = df_new
-                df_combined_man.to_csv(MANUAL_YAYOI_CSV, index=False, encoding="utf-8-sig")
+                new_rows = []
+                for rd in rows_data:
+                    if rd["item"] != "(選択なし)" and rd["qty"] > 0:
+                        code_val = rd["item"].split(" ｜ ")[0].strip()
+                        new_rows.append({
+                            "受注番号": next_order_no,
+                            "得意先名": str(add_comp).strip(),
+                            "商品コード": code_val,
+                            "受注残数": int(rd["qty"]),
+                            "数量": int(rd["qty"]),
+                            "受注日": add_date.strftime("%Y-%m-%d"),
+                            "納入期日": add_limit.strftime("%Y-%m-%d"),
+                            "受注日_dt": pd.to_datetime(add_date),
+                            "納入期日_dt": pd.to_datetime(add_limit),
+                            "備考": str(rd["memo"]).strip(),
+                            "倉庫名": "WEB入力",
+                            "商品名/摘要": "",
+                            "担当者名": str(add_staff).strip()
+                        })
                 
-                st.cache_data.clear()
-                st.success(f"✅ 受注番号『{next_order_no}』で登録しました！表を更新しています...")
-                st.rerun()
+                if not new_rows:
+                    st.error("⚠️ 数量が1以上の明細が1つも入力されていません。")
+                else:
+                    df_new = pd.DataFrame(new_rows)
+                    if os.path.exists(MANUAL_YAYOI_CSV):
+                        df_existing = pd.read_csv(MANUAL_YAYOI_CSV)
+                        df_combined_man = pd.concat([df_existing, df_new], ignore_index=True)
+                    else:
+                        df_combined_man = df_new
+                    df_combined_man.to_csv(MANUAL_YAYOI_CSV, index=False, encoding="utf-8-sig")
+                    
+                    st.cache_data.clear()
+                    st.success(f"✅ 受注番号『{next_order_no}』で {len(new_rows)}件の明細を一括登録しました！")
+                    st.rerun()
                 
     st.markdown("</div>", unsafe_allow_html=True)
 
