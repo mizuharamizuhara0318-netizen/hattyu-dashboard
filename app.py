@@ -94,12 +94,12 @@ def load_yayoi_data(uploaded_file):
         df["納入期日_dt"] = pd.to_datetime(df["納入期日"], errors="coerce")
         df["受注日"] = df["受注日_dt"].dt.strftime("%Y-%m-%d").fillna("")
         df["納入期日"] = df["納入期日_dt"].dt.strftime("%Y-%m-%d").fillna("")
-        df["備考"] = df["備考"].apply(clean_str)
-        df["倉庫名"] = df["倉庫名"].apply(clean_str)
-        df["商品名/摘要"] = df["商品名/摘要"].apply(clean_str)
+        df["備考"] = df["備考"].apply(clean_str) if "備考" in df.columns else ""
+        df["倉庫名"] = df["倉庫名"].apply(clean_str) if "倉庫名" in df.columns else ""
+        df["商品名/摘要"] = df["商品名/摘要"].apply(clean_str) if "商品名/摘要" in df.columns else ""
         df["担当者名"] = df["担当者名"].apply(clean_str) if "担当者名" in df.columns else ""
     else:
-        df = pd.DataFrame(columns=["得意先名", "商品コード", "受注残数", "数量", "受注日", "納入期日", "備考", "倉庫名", "担当者名", "受注日_dt", "納入期日_dt"])
+        df = pd.DataFrame(columns=["得意先名", "商品コード", "受注残数", "数量", "受注日", "納入期日", "備考", "倉庫名", "商品名/摘要", "担当者名", "受注日_dt", "納入期日_dt"])
 
     if os.path.exists(MANUAL_YAYOI_CSV):
         try:
@@ -107,6 +107,8 @@ def load_yayoi_data(uploaded_file):
             if not df_man.empty:
                 df_man["受注日_dt"] = pd.to_datetime(df_man["受注日"], errors="coerce")
                 df_man["納入期日_dt"] = pd.to_datetime(df_man["納入期日"], errors="coerce")
+                if "商品名/摘要" not in df_man.columns:
+                    df_man["商品名/摘要"] = ""
                 df = pd.concat([df, df_man], ignore_index=True)
         except Exception:
             pass
@@ -149,7 +151,6 @@ def load_sales_csvs(uploaded_files):
 @st.cache_data
 def load_excel_master(uploaded_file):
     if uploaded_file is None:
-        # ファイルが未アップロードの場合の安全なデモデータ（画面が必ず表示されるようにする）
         demo_items = [{
             "No": 1, "商品センター": "伊賀", "品番": "APL-4312SBL", "商品区分": "ミニホイッスル付LEDアルミライト II",
             "1課発注点": 270, "2課発注点": "", "在庫数_ロジザード": 612, "入荷予定数_ロジザード": 0, "入荷予定日_ロジザード": "",
@@ -625,7 +626,7 @@ with tab1:
         const histMap = {hist_json};
         let currentModalIdx = null;
 
-        const savedEdits = JSON.parse(localStorage.getItem("hattyu_edits_v1") || "{{}}");
+        const savedEdits = JSON.parse(localStorage.getItem("hattyu_edits_v1"] || "{{}}");
         tableData.forEach(r => {{
             if (savedEdits[r["品番"]]) {{
                 r["入荷予定日_ロジザード"] = savedEdits[r["品番"]].ndate ?? r["入荷予定日_ロジザード"];
@@ -748,7 +749,7 @@ with tab1:
                         <td>${{y["備考"]}}</td>
                     </tr>`;
                 }});
-                yHtml += `</tbody></table>`;
+                yHtml += `</table>`;
                 document.getElementById("modal-yayoi-area").innerHTML = yHtml;
             }}
 
@@ -765,7 +766,7 @@ with tab1:
                         <td style="font-weight:bold;">${{h["決定事項"]}}</td>
                     </tr>`;
                 }});
-                hHtml += `</tbody></table>`;
+                hHtml += `</table>`;
                 document.getElementById("modal-hist-area").innerHTML = hHtml;
             }}
 
@@ -870,7 +871,9 @@ with tab2:
                     st.markdown("##### 📈 選択した会社の月別 納入スケジュール（受注残数合計）")
                     st.bar_chart(monthly_sch)
 
-        st.dataframe(yv_merged[["得意先名", "商品コード", "商品名/摘要", "受注残数", "受注日", "納入期日", "備考", "倉庫名", "入荷予定日_ロジザード", "前回決定事項", "決定事項"]], hide_index=True, use_container_width=True, height=450)
+        # 存在しない列名エラー（KeyError）を防ぐため、安全な列のみを指定して表示
+        display_cols = [c for c in ["得意先名", "商品コード", "商品名/摘要", "受注残数", "受注日", "納入期日", "備考", "倉庫名", "入荷予定日_ロジザード", "前回決定事項", "決定事項"] if c in yv_merged.columns]
+        st.dataframe(yv_merged[display_cols], hide_index=True, use_container_width=True, height=450)
 
 with tab3:
     st.markdown("""
@@ -878,12 +881,10 @@ with tab3:
         <div class="yayoi-form-header">💻 受注伝票入力（弥生販売風・新規確保データの登録）</div>
     """, unsafe_allow_html=True)
     
-    # 得意先リストの構築（安全なフォールバック付き）
     company_options = ["アマゾンベンダー（ホーム）", "株式会社オバタ", "丸藤", "トップ産業", "ら・でぃっしゅぼーや株式会社"]
     if not df_yayoi.empty and "得意先名" in df_yayoi.columns:
         company_options = sorted(df_yayoi["得意先名"].dropna().unique().tolist())
 
-    # 商品リストの構築
     item_options = [f"{row['品番']} ｜ {row['商品区分']}" for _, row in df_main.iterrows()] if not df_main.empty else ["APL-4312SBL ｜ ミニホイッスル付LEDアルミライト II"]
 
     with st.form("add_yayoi_form_yayoi_style"):
@@ -925,6 +926,7 @@ with tab3:
                     "納入期日_dt": pd.to_datetime(add_limit),
                     "備考": str(add_memo).strip(),
                     "倉庫名": "WEB入力",
+                    "商品名/摘要": "",
                     "担当者名": str(add_staff).strip()
                 }
                 df_new = pd.DataFrame([new_row])
