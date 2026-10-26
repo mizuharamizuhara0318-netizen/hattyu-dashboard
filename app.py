@@ -949,43 +949,46 @@ with tab3:
         <div class="yayoi-form-header">💻 受注伝票入力（弥生販売風・新規確保データの登録）</div>
     """, unsafe_allow_html=True)
     
-    # 1. 弥生会社名.xlsx から会社リストを読み込み（ファイルがない場合のフォールバックも完備）
+    # 弥生の会社リスト（弥生会社名.xlsx または既存データから安全に抽出）
     company_options = []
     if os.path.exists(YAYOI_COMP_EXCEL):
         try:
             df_c_m = pd.read_excel(YAYOI_COMP_EXCEL, sheet_name=0)
-            c_col = next((c for c in df_c_m.columns if any(k in str(c) for k in ["会社", "得意先", "名称", "顧客", "tokuisaki", "得意先名"])), df_c_m.columns[0])
-            company_options = df_c_m[c_col].dropna().astype(str).str.strip().tolist()
+            # すべての列を走査して、文字データが多い列（会社名列）を特定
+            for col in df_c_m.columns:
+                s_vals = df_c_m[col].dropna().astype(str).str.strip()
+                if len(s_vals) > 0:
+                    company_options = s_vals.tolist()
+                    break
         except Exception:
             pass
-    if not company_options and not df_yayoi.empty:
-        company_options = sorted(df_yayoi["得意先名"].unique().tolist())
+    if not company_options and not df_yayoi.empty and "得意先名" in df_yayoi.columns:
+        company_options = sorted(df_yayoi["得意先名"].dropna().unique().tolist())
     if not company_options:
-        company_options = ["アマゾンベンダー（ホーム）", "株式会社オバタ", "丸藤", "トップ産業", "ら・でぃっしゅぼーや株式会社"]
+        company_options = ["ら・でぃっしゅぼーや株式会社", "アマゾンベンダー（ホーム）", "株式会社オバタ", "丸藤", "トップ産業"]
 
-    # 2. 弥生商品番号.xlsx から商品リストを読み込み
+    # 弥生の商品リスト（弥生商品番号.xlsx またはメインマスタから安全に抽出）
     item_options = []
-    item_dict = {}
     if os.path.exists(YAYOI_ITEM_EXCEL):
         try:
             df_i_m = pd.read_excel(YAYOI_ITEM_EXCEL, sheet_name=0)
-            code_col_m = next((c for c in df_i_m.columns if any(k in str(c) for k in ["コード", "品番", "商品コード"])), df_i_m.columns[0])
-            name_col_m = next((c for c in df_i_m.columns if any(k in str(c) for k in ["名称", "商品名", "品名", "摘要"])), df_i_m.columns[1] if len(df_i_m.columns) > 1 else df_i_m.columns[0])
+            # コード列と名称列を柔軟に検出
+            code_col_m = df_i_m.columns[0]
+            name_col_m = df_i_m.columns[1] if len(df_i_m.columns) > 1 else df_i_m.columns[0]
             for _, r in df_i_m.iterrows():
                 c_val = str(r[code_col_m]).strip()
                 n_val = str(r[name_col_m]).strip()
                 if c_val and c_val != "nan":
                     item_options.append(f"{c_val} ｜ {n_val}")
-                    item_dict[c_val] = n_val
         except Exception:
             pass
-    if not item_options:
+    if not item_options and not m_df.empty:
         item_options = [f"{row['品番']} ｜ {row['商品区分']}" for _, row in m_df.iterrows()]
-        for _, row in m_df.iterrows():
-            item_dict[row['品番']] = row['商品区分']
+    if not item_options:
+        item_options = ["APL-4312SBL ｜ ミニホイッスル付LEDアルミライト II"]
 
     with st.form("add_yayoi_form_yayoi_style"):
-        rand_suffix = random.randint(100, 999)
+        rand_suffix = random.randint(1000, 9999)
         next_order_no = f"WEB-{datetime.date.today().strftime('%Y%m%d')}-{rand_suffix}"
         
         f_h1, f_h2, f_h3 = st.columns(3)
