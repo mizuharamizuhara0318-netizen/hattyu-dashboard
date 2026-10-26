@@ -6,8 +6,10 @@ import datetime
 import os
 import glob
 import json
-import zlib
+import gzip
 import base64
+import random
+import time
 
 st.set_page_config(page_title="発注検討表 ＆ 弥生受注管理システム", layout="wide")
 
@@ -53,234 +55,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ---------------------------------------------------------
-# 1. 送付いただいた『弥生会社名.xlsx (342社)』『弥生商品番号.xlsx (1312商品・U列倉庫)』内蔵データ
-# ---------------------------------------------------------
-EMBEDDED_COMP_B64 = (
-    "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"
-)
-
-EMBEDDED_ITEM_B64 = (
-    "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"
-    "udT+UeL//f8BWn3yfA=="
-)
-
-# ---------------------------------------------------------
-# 2. ファイルパスの自動探索（GitHub・ローカルGドライブ両対応）
-# ---------------------------------------------------------
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in locals() else "."
 
 SEARCH_DIRS = [
@@ -313,12 +87,8 @@ YAYOI_COMP_EXCEL = find_target_file(["弥生会社名", "会社名"])
 SAVE_CSV = os.path.join(SCRIPT_DIR, "meeting_decisions_v8.csv")
 MANUAL_YAYOI_CSV = os.path.join(SCRIPT_DIR, "yayoi_manual_additions.csv")
 
-# ご指定の担当者リスト（番号なし）
 STAFF_OPTIONS_CLEAN = ["", "小泉", "鈴木", "松平", "原", "西山", "田中", "水原", "川村", "穴山"]
 
-# ---------------------------------------------------------
-# 3. 補助関数（正規化・数値変換）
-# ---------------------------------------------------------
 def is_na_val(val):
     if val is None or pd.isna(val):
         return True
@@ -335,8 +105,7 @@ def clean_str(val):
 
 def normalize_code(val):
     s = clean_str(val).upper()
-    s = s.replace(" ", "").replace(" ", "").replace("－", "-").replace("ー", "-")
-    return s
+    return s.replace(" ", "").replace(" ", "").replace("－", "-").replace("ー", "-")
 
 def to_num(val):
     if is_na_val(val):
@@ -347,74 +116,50 @@ def to_num(val):
     except Exception:
         return 0.0
 
-# ---------------------------------------------------------
-# 4. マスタ・データ読み込み関数
-# ---------------------------------------------------------
-@st.cache_data
-def get_embedded_masters():
-    """送付いただいたExcel（342社・1312商品＋U列倉庫）を解凍して返す"""
-    try:
-        raw_c = json.loads(zlib.decompress(base64.b64decode(EMBEDDED_COMP_B64)).decode("utf-8"))
-        comps = [{"code": c[0], "name": c[1]} for c in raw_c]
-    except Exception:
-        comps = []
-    try:
-        raw_i = json.loads(zlib.decompress(base64.b64decode(EMBEDDED_ITEM_B64)).decode("utf-8"))
-        items = [{"code": i[0], "name": i[1], "wh": i[2] if i[2] else "名古屋"} for i in raw_i]
-    except Exception:
-        items = []
-    return comps, items
-
 @st.cache_data
 def load_company_master(file_source):
-    """『弥生会社名.xlsx』のB列(index 1: コード)・C列(index 2: 名称)を5行目以降から正確に読み込む"""
-    comps, _ = get_embedded_masters()
-    if file_source is None:
-        return comps
-    try:
-        df_c = pd.read_excel(file_source, sheet_name=0, header=None)
-        loaded = []
-        seen = set()
-        for idx in range(len(df_c)):
-            r = df_c.iloc[idx].values
-            if len(r) < 3:
-                continue
-            c_code = clean_str(r[1])
-            c_name = clean_str(r[2])
-            if not c_name or c_name in ("名称", "得意先名", "会社名", "得意先リスト", "コード順"):
-                continue
-            if c_name not in seen:
-                seen.add(c_name)
-                loaded.append({"code": c_code, "name": c_name})
-        return loaded if loaded else comps
-    except Exception:
-        return comps
+    loaded = []
+    seen = set()
+    if file_source and os.path.exists(file_source):
+        try:
+            df_c = pd.read_excel(file_source, sheet_name=0, header=None)
+            for idx in range(len(df_c)):
+                r = df_c.iloc[idx].values
+                if len(r) < 3:
+                    continue
+                c_code = clean_str(r[1])
+                c_name = clean_str(r[2])
+                if not c_name or c_name in ("名称", "得意先名", "会社名", "得意先リスト", "コード順"):
+                    continue
+                if c_name not in seen:
+                    seen.add(c_name)
+                    loaded.append({"code": c_code, "name": c_name})
+        except Exception:
+            pass
+    return loaded
 
 @st.cache_data
 def load_item_master(file_source):
-    """『弥生商品番号.xlsx』のB列(index 1: コード)・C列(index 2: 名称)・U列(index 20: 主たる倉庫)を正確に読み込む"""
-    _, items = get_embedded_masters()
-    if file_source is None:
-        return items
-    try:
-        df_i = pd.read_excel(file_source, sheet_name=0, header=None)
-        loaded = []
-        seen = set()
-        for idx in range(len(df_i)):
-            r = df_i.iloc[idx].values
-            if len(r) < 3:
-                continue
-            i_code = clean_str(r[1])
-            i_name = clean_str(r[2])
-            i_wh = clean_str(r[20]) if len(r) > 20 else ""
-            if not i_code or i_code in ("コード", "商品コード", "品番", "商品リスト", "コード順"):
-                continue
-            if i_code not in seen:
-                seen.add(i_code)
-                loaded.append({"code": i_code, "name": i_name, "wh": i_wh if i_wh else "名古屋"})
-        return loaded if loaded else items
-    except Exception:
-        return items
+    loaded = []
+    seen = set()
+    if file_source and os.path.exists(file_source):
+        try:
+            df_i = pd.read_excel(file_source, sheet_name=0, header=None)
+            for idx in range(len(df_i)):
+                r = df_i.iloc[idx].values
+                if len(r) < 3:
+                    continue
+                i_code = clean_str(r[1])
+                i_name = clean_str(r[2])
+                i_wh = clean_str(r[20]) if len(r) > 20 else ""
+                if not i_code or i_code in ("コード", "商品コード", "品番", "商品リスト", "コード順"):
+                    continue
+                if i_code not in seen:
+                    seen.add(i_code)
+                    loaded.append({"code": i_code, "name": i_name, "wh": i_wh if i_wh else "名古屋"})
+        except Exception:
+            pass
+    return loaded
 
 @st.cache_data
 def load_excel_master(file_source):
@@ -595,7 +340,6 @@ def load_yayoi_data(file_source):
 
 @st.cache_data
 def load_sales_csvs(uploaded_files, valid_norm_codes_tuple):
-    """弥生売上CSV群から「売上数量」列だけを厳密に特定して今月売れ数を集計（単価・金額・入数を誤集計しない）"""
     valid_codes = set(valid_norm_codes_tuple)
     all_dfs = []
 
@@ -630,14 +374,12 @@ def load_sales_csvs(uploaded_files, valid_norm_codes_tuple):
 
         loaded_file_count += 1
 
-        # ヘッダー行の探索（先頭5行以内）
         header_row_idx = None
         code_col_idx = None
         qty_col_idx = None
         for r_i in range(min(5, len(df_s))):
             row_strs = [clean_str(x) for x in df_s.iloc[r_i].values]
             c_idx = next((i for i, c in enumerate(row_strs) if c in ("商品コード", "品番", "商品番号", "コード") or "商品コード" in c), None)
-            # 単価・金額・入数・ケース・税などを除外して純粋な「数量」列を探す
             q_idx = next((
                 i for i, c in enumerate(row_strs)
                 if c in ("数量", "売上数量", "受注数量", "出荷数量", "受注残数", "売上数")
@@ -660,7 +402,6 @@ def load_sales_csvs(uploaded_files, valid_norm_codes_tuple):
             all_dfs.append(temp)
             continue
 
-        # ヘッダー無しの弥生販売エクスポート形式（25列以上の標準売上明細フォーマット等）の場合
         best_code_col = None
         best_match_cnt = 0
         for col_i in range(df_s.shape[1]):
@@ -671,8 +412,6 @@ def load_sales_csvs(uploaded_files, valid_norm_codes_tuple):
                 best_code_col = col_i
 
         if best_code_col is not None and best_match_cnt > 0:
-            # 弥生販売の標準伝票CSVでは「商品コード(col) -> 商品名(col+1) -> 単位(col+2) -> 入数(col+3) -> ケース(col+4) -> 数量(col+5) -> 単価(col+6) -> 金額(col+7)」または「商品コード -> 商品名 -> 数量 -> 単価 -> 金額」の並びになっている
-            # 右側の数値列から「数量×単価＝金額」が成り立つ列を最優先で特定する！
             num_cols = {}
             for q_i in range(best_code_col + 1, min(best_code_col + 12, df_s.shape[1])):
                 s_num = pd.to_numeric(df_s.iloc[:, q_i].astype(str).str.replace(",", ""), errors="coerce")
@@ -686,7 +425,6 @@ def load_sales_csvs(uploaded_files, valid_norm_codes_tuple):
                     for idx_c in range(idx_b + 1, len(col_indices)):
                         ca, cb, cc = col_indices[idx_a], col_indices[idx_b], col_indices[idx_c]
                         va, vb, vc = num_cols[ca], num_cols[cb], num_cols[cc]
-                        # va(数量) * vb(単価) == vc(金額) が成り立つ行があるか検証
                         valid_mask = (va > 0) & (vb > 10) & (vc > 0)
                         if valid_mask.sum() > 0:
                             matches = ((va[valid_mask] * vb[valid_mask] - vc[valid_mask]).abs() <= 1).sum()
@@ -699,7 +437,6 @@ def load_sales_csvs(uploaded_files, valid_norm_codes_tuple):
                     break
 
             if verified_qty_col is None and col_indices:
-                # 積の検証で見つからない場合は、入数(全て1や0)や課税区分ではなく、適度なばらつきのある最初の数値列を採用
                 for c_cand in col_indices:
                     v_cand = num_cols[c_cand]
                     pos_vals = v_cand[v_cand > 0]
@@ -721,7 +458,7 @@ def load_sales_csvs(uploaded_files, valid_norm_codes_tuple):
     return combined.groupby("code_norm")["qty"].sum().astype(int), loaded_file_count
 
 # ---------------------------------------------------------
-# 5. 上部ヘッダー ＆ 売上CSV読込バー
+# ヘッダー ＆ アップローダー
 # ---------------------------------------------------------
 head_col1, head_col2 = st.columns([3.0, 2.2])
 with head_col1:
@@ -733,8 +470,8 @@ with head_col2:
         up_main = u_c1.file_uploader("📋 発注検討表.xlsx", type=["xlsx"], key="up_m")
         up_yayoi = u_c2.file_uploader("📑 弥生確保リスト.xlsx", type=["xlsx"], key="up_y")
         u_c3, u_c4 = st.columns(2)
-        up_comp = u_c3.file_uploader("🏢 弥生会社名.xlsx (342社内蔵済)", type=["xlsx"], key="up_comp")
-        up_item = u_c4.file_uploader("📦 弥生商品番号.xlsx (1312点内蔵済)", type=["xlsx"], key="up_item")
+        up_comp = u_c3.file_uploader("🏢 弥生会社名.xlsx", type=["xlsx"], key="up_comp")
+        up_item = u_c4.file_uploader("📦 弥生商品番号.xlsx", type=["xlsx"], key="up_item")
         if st.button("🔄 最新状態に再読み込み", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
@@ -763,7 +500,6 @@ for it in master_items:
     item_name_map[c_norm] = it["name"]
     item_name_map[it["code"]] = it["name"]
 
-# 発注検討表にある商品で弥生商品番号に無いものがあれば補完
 seen_i_codes = {normalize_code(it["code"]) for it in master_items}
 for _, r in df_main.iterrows():
     ic = clean_str(r["品番"])
@@ -776,7 +512,6 @@ for _, r in df_main.iterrows():
         item_wh_map[ic_n] = wh_def
         item_name_map[ic] = clean_str(r["商品区分"])
 
-# 売上CSVの集計・マッピング
 valid_norm_tuple = tuple(df_main["品番_正規化"].unique())
 sales_series, sales_file_cnt = load_sales_csvs(up_sales, valid_norm_tuple)
 if not sales_series.empty:
@@ -784,10 +519,8 @@ if not sales_series.empty:
 else:
     df_main["今月売れ数"] = 0
 
-# 弥生確保データの集計＆連動
 if not df_yayoi.empty:
     df_yayoi["品番_正規化"] = df_yayoi["商品コード"].apply(normalize_code)
-    # 倉庫名が空欄またはWEB入力の場合は弥生商品番号のU列の倉庫名を自動適用
     df_yayoi["倉庫名"] = df_yayoi.apply(
         lambda r: item_wh_map.get(normalize_code(r["商品コード"]), "名古屋")
         if clean_str(r.get("倉庫名", "")) in ("", "WEB入力", "弥生風入力") else clean_str(r["倉庫名"]),
@@ -836,13 +569,13 @@ if not df_hist.empty:
 total_sales_qty = int(m_df["今月売れ数"].sum())
 st.caption(
     f"✅ **マスタ完全連動中** ｜ 発注検討表: **{len(m_df):,}** 商品 ｜ "
-    f"弥生会社名マスタ: **{len(master_comps):,}** 社 ｜ "
-    f"弥生商品番号マスタ: **{len(master_items):,}** 点（U列倉庫自動連動） ｜ "
+    f"得意先マスタ: **{len(master_comps):,}** 社 ｜ "
+    f"商品マスタ: **{len(master_items):,}** 点（U列倉庫連動） ｜ "
     f"🔥 今月売れ数合計: **{total_sales_qty:,}** 個 （読込CSV: {sales_file_cnt} 件）"
 )
 
 # ---------------------------------------------------------
-# 6. タブ構成
+# タブ構成
 # ---------------------------------------------------------
 tab1, tab2, tab3, tab4 = st.tabs([
     f"📋 1. 発注検討表（全 {len(m_df):,} 件・クリック即ポップアップ）",
@@ -852,7 +585,7 @@ tab1, tab2, tab3, tab4 = st.tabs([
 ])
 
 # =========================================================
-# タブ1：発注検討表（中央ポップアップ付き）
+# タブ1：発注検討表
 # =========================================================
 with tab1:
     f_col1, f_col2, f_col3 = st.columns([2.6, 1.3, 3.0])
@@ -1238,7 +971,7 @@ with tab1:
     components.html(html_tab1, height=640, scrolling=False)
 
 # =========================================================
-# タブ2：会社（得意先）別・受注番号別 確保リスト（発注検討表と同じ中央ポップアップ式！）
+# タブ2：会社（得意先）別 確保リスト（中央ポップアップ式）
 # =========================================================
 with tab2:
     if df_yayoi.empty:
@@ -1262,14 +995,12 @@ with tab2:
                 yv["備考"].str.contains(kw_comp, case=False, na=False)
             ]
 
-        # 発注検討表の在庫情報・商品名を結合
         yv_full = pd.merge(
             yv,
             m_df[["品番_正規化", "商品区分", "在庫数_ロジザード", "入荷予定日_ロジザード", "入荷後のフリー在庫", "発注検討フラグ", "決定事項"]],
             on="品番_正規化", how="left"
         ).fillna("")
 
-        # 受注番号ごとに集約したリストと、各受注番号の明細リストをJSON化
         slips_summary_list = []
         slip_details_map = {}
 
@@ -1341,7 +1072,6 @@ with tab2:
             .click-link {{ color: #0284c7; font-weight: bold; text-decoration: underline; cursor: pointer; }}
             .click-link:hover {{ color: #1d4ed8; }}
 
-            /* 発注検討表と同じ中央ポップアップウィンドウ */
             .modal-overlay {{
                 display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
                 background: rgba(15, 23, 42, 0.55); z-index: 9999; justify-content: center; align-items: center;
@@ -1366,7 +1096,7 @@ with tab2:
         <body>
         <div class="toolbar">
             <div class="toolbar-info">受注伝票件数: <span id="slip-count">0</span> 件（受注番号ごとに集約）</div>
-            <div class="toolbar-hint">💡 「受注番号」または「得意先名」をクリックすると、発注検討表と同じ見やすいポップアップで登録内容が開きます！</div>
+            <div class="toolbar-hint">💡 行をクリックすると、発注検討表と同じポップアップで登録内容が開きます！</div>
         </div>
         <div class="table-wrap">
             <table>
@@ -1489,10 +1219,9 @@ with tab2:
         components.html(html_tab2, height=620, scrolling=False)
 
 # =========================================================
-# タブ3：弥生受注伝票（新規作成時は完全白紙・U列倉庫自動連動・最大100行・ポップアップ検索）
+# タブ3：弥生受注伝票（新規白紙・U列倉庫自動連動・最大100行・ポップアップ検索）
 # =========================================================
 with tab3:
-    # 1から自動で重複しない受注番号を発行（既存最大値 + 1）
     max_seq = 0
     if os.path.exists(MANUAL_YAYOI_CSV):
         try:
@@ -1505,14 +1234,11 @@ with tab3:
             pass
     next_order_no_str = f"{max_seq + 1:08d}"
 
-    # 得意先プルダウン選択肢（先頭は白紙 ""）
     comp_select_list = [""] + [f"{c['name']}" + (f" （{c['code']}）" if c["code"] else "") for c in master_comps]
-    # 商品プルダウン選択肢（先頭は白紙 ""、選ぶとU列の倉庫も分かる表示）
     item_select_list = [""] + [f"{it['code']} ｜ {it['name']} 【{it.get('wh','名古屋')}】" for it in master_items]
     code_to_item_label = {it["code"]: f"{it['code']} ｜ {it['name']} 【{it.get('wh','名古屋')}】" for it in master_items}
 
     def create_blank_slip(order_no_val):
-        """新規作成用の完全白紙伝票データを生成"""
         return {
             "order_no": order_no_val,
             "order_date": datetime.date.today(),
@@ -1520,7 +1246,7 @@ with tab3:
             "comp_label": "",
             "staff": "",
             "summary": "",
-            "version": random.randint(10000, 99999),
+            "version": int(time.time() * 1000) % 1000000,
             "grid_df": pd.DataFrame([
                 {"商品（B列コード ｜ C列名称）": "", "倉庫（U列自動）": "", "受注残数(数量)": 0, "備考": ""}
                 for _ in range(10)
@@ -1533,10 +1259,9 @@ with tab3:
     slip_state = st.session_state["slip_editor_state"]
     v_key = slip_state.get("version", 1)
 
-    # --- ポップアップ式の受注伝票検索ダイアログ ---
     @st.dialog("🔍 受注伝票検索（クリックで詳細確認 ＆ そのまま編集画面へ呼び出し）", width="large")
     def open_yayoi_search_modal():
-        st.caption("💡 登録されている伝票を受注番号ごとに一覧表示しています。確認・修正したい行をクリックすると詳細が開き、そのまま編集画面に呼び出せます。")
+        st.caption("💡 登録されている伝票を受注番号ごとに一覧表示しています。行をクリックすると詳細が開き、編集画面に呼び出せます。")
         kw_modal = st.text_input("🔍 受注番号・得意先名・品番で検索", placeholder="例: 00000001 / オバタ / 丸藤")
 
         df_search_src = df_yayoi.copy()
@@ -1631,12 +1356,11 @@ with tab3:
                 "comp_label": matched_comp,
                 "staff": st_name,
                 "summary": clean_str(first_r.get("備考", "")),
-                "version": random.randint(10000, 99999),
+                "version": int(time.time() * 1000) % 1000000,
                 "grid_df": pd.DataFrame(grid_rows[:100])
             }
             st.rerun()
 
-    # 上部操作ボタンバー
     top_b1, top_b2, top_b3, top_b4 = st.columns([1.8, 2.3, 1.9, 2.5])
     if top_b1.button("📄 新規作成（すべて白紙にリセット）", use_container_width=True):
         st.session_state["slip_editor_state"] = create_blank_slip(next_order_no_str)
@@ -1656,7 +1380,6 @@ with tab3:
             slip_state["grid_df"] = pd.concat([cur_df, extra_df], ignore_index=True)
             st.rerun()
 
-    # 弥生風伝票ヘッダー入力部
     st.markdown('<div class="yayoi-slip-header">💻 受注伝票入力（新規作成時は白紙 ／ 商品を選ぶと弥生商品番号のU列から正しい倉庫名を自動セット）</div>', unsafe_allow_html=True)
     st.markdown('<div class="yayoi-slip-body">', unsafe_allow_html=True)
 
@@ -1727,7 +1450,6 @@ with tab3:
         }
     )
 
-    # 商品が選択された行に対して、弥生商品番号.xlsxのU列（主たる倉庫）を自動プレビュー表示
     preview_rows = []
     for idx_r, r_g in raw_edited_grid.iterrows():
         sel_p = clean_str(r_g.get("商品（B列コード ｜ C列名称）", ""))
@@ -1751,7 +1473,6 @@ with tab3:
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # 登録ボタン・削除ボタン（クリックした時のみ実行）
     b_col1, b_col2 = st.columns([3.2, 1.0])
     if b_col1.button("💾 この伝票を登録・上書き保存する（クリックで確定）", type="primary", use_container_width=True):
         comp_clean = in_comp_label.split(" （")[0].strip()
@@ -1771,7 +1492,6 @@ with tab3:
                 if sel_prod and qty_v > 0:
                     p_code = sel_prod.split(" ｜ ")[0].strip()
                     p_name = item_name_map.get(normalize_code(p_code), item_name_map.get(p_code, ""))
-                    # 弥生商品番号.xlsx の U列の倉庫名を100%自動でセット
                     u_wh = item_wh_map.get(normalize_code(p_code), item_wh_map.get(p_code, "名古屋"))
                     valid_items.append({
                         "受注番号": clean_str(in_ono),
@@ -1801,7 +1521,6 @@ with tab3:
 
                 df_out.to_csv(MANUAL_YAYOI_CSV, index=False, encoding="utf-8-sig")
                 st.cache_data.clear()
-                # 登録完了後は次の新規番号で白紙状態にリセット
                 new_next_no = f"{max(max_seq + 1, int(clean_str(in_ono)) if clean_str(in_ono).isdigit() else max_seq + 1) + 1:08d}"
                 st.session_state["slip_editor_state"] = create_blank_slip(new_next_no)
                 st.success(f"✅ 受注番号『{in_ono}』（得意先: {comp_clean} ／ 担当: {staff_clean} ／ 明細 {len(valid_items)} 行）を保存しました！")
