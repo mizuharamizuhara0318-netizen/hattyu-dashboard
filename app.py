@@ -285,7 +285,7 @@ main_src = up_main if up_main is not None else (MAIN_EXCEL if os.path.exists(MAI
 yayoi_src = up_yayoi if up_yayoi is not None else (YAYOI_EXCEL if os.path.exists(YAYOI_EXCEL) else None)
 
 if main_src is None:
-    st.error("⚠️ メインの『発注検討表.xlsx』が見つかりません。")
+    st.error("⚠️ メインの『発注検討表.xlsx』が見つかりません。上の「最新データ更新」からアップロードしてください。")
     st.stop()
 
 df_yayoi = load_yayoi_data(yayoi_src) if yayoi_src is not None else pd.DataFrame()
@@ -696,7 +696,7 @@ with tab1:
         const histMap = {hist_json};
         let currentModalIdx = null;
 
-        const savedEdits = JSON.parse(localStorage.getItem("hattyu_edits_v1"] || "{{}}");
+        const savedEdits = JSON.parse(localStorage.getItem("hattyu_edits_v1") || "{{}}");
         tableData.forEach(r => {{
             if (savedEdits[r["品番"]]) {{
                 r["入荷予定日_ロジザード"] = savedEdits[r["品番"]].ndate ?? r["入荷予定日_ロジザード"];
@@ -949,19 +949,19 @@ with tab3:
         <div class="yayoi-form-header">💻 受注伝票入力（弥生販売風・新規確保データの登録）</div>
     """, unsafe_allow_html=True)
     
-    # 1. 弥生会社名.xlsx から会社リストを読み込み
+    # 1. 弥生会社名.xlsx から会社リストを読み込み（ファイルがない場合のフォールバックも完備）
     company_options = []
     if os.path.exists(YAYOI_COMP_EXCEL):
         try:
             df_c_m = pd.read_excel(YAYOI_COMP_EXCEL, sheet_name=0)
-            c_col = next((c for c in df_c_m.columns if any(k in str(c) for k in ["会社", "得意先", "名称", "顧客"])), df_c_m.columns[0])
+            c_col = next((c for c in df_c_m.columns if any(k in str(c) for k in ["会社", "得意先", "名称", "顧客", "tokuisaki", "得意先名"])), df_c_m.columns[0])
             company_options = df_c_m[c_col].dropna().astype(str).str.strip().tolist()
         except Exception:
             pass
     if not company_options and not df_yayoi.empty:
         company_options = sorted(df_yayoi["得意先名"].unique().tolist())
     if not company_options:
-        company_options = ["アマゾンベンダー（ホーム）", "株式会社オバタ", "丸藤", "トップ産業"]
+        company_options = ["アマゾンベンダー（ホーム）", "株式会社オバタ", "丸藤", "トップ産業", "ら・でぃっしゅぼーや株式会社"]
 
     # 2. 弥生商品番号.xlsx から商品リストを読み込み
     item_options = []
@@ -985,7 +985,6 @@ with tab3:
             item_dict[row['品番']] = row['商品区分']
 
     with st.form("add_yayoi_form_yayoi_style"):
-        # 自動重複なし受注番号の生成
         rand_suffix = random.randint(100, 999)
         next_order_no = f"WEB-{datetime.date.today().strftime('%Y%m%d')}-{rand_suffix}"
         
