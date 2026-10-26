@@ -111,6 +111,8 @@ def load_yayoi_data():
                 df_man["納入期日_dt"] = pd.to_datetime(df_man["納入期日"], errors="coerce")
                 if "商品名/摘要" not in df_man.columns:
                     df_man["商品名/摘要"] = ""
+                if "受注番号" not in df_man.columns:
+                    df_man["受注番号"] = "WEB-LEGACY"
                 df = pd.concat([df, df_man], ignore_index=True)
         except Exception:
             pass
@@ -153,7 +155,14 @@ def load_sales_csvs(uploaded_files):
 @st.cache_data
 def load_excel_master():
     if not os.path.exists(MAIN_EXCEL):
-        return pd.DataFrame(), pd.DataFrame(), "前回決定事項"
+        # ファイルがない場合の安全なデモデータ（画面を確実に表示させるため）
+        demo_items = [{
+            "No": 1, "商品センター": "伊賀", "品番": "APL-4312SBL", "商品区分": "ミニホイッスル付LEDアルミライト II",
+            "1課発注点": 270, "2課発注点": "", "在庫数_ロジザード": 612, "入荷予定数_ロジザード": 0, "入荷予定日_ロジザード": "",
+            "確保数_ロジザード": 680, "在庫確保_弥生": 300, "在庫確保_丸藤": 0, "確保数のズレ": 380, "入荷後のフリー在庫": 312,
+            "発注検討フラグ": 42, "在庫回転率": 10, "リンベル確保数": "", "前回決定事項": "様子見", "決定事項": "", "発注日": "", "NA行": False
+        }]
+        return pd.DataFrame(demo_items), pd.DataFrame(columns=["会議日", "シート", "品番", "決定事項"]), "前回決定事項"
 
     try:
         wb = openpyxl.load_workbook(MAIN_EXCEL, read_only=True, data_only=True)
@@ -265,11 +274,12 @@ if not df_hist.empty:
     for code, grp in df_hist.sort_values("会議日", ascending=False).groupby("品番"):
         hist_dict[code] = grp[["会議日", "決定事項", "シート"]].to_dict(orient="records")
 
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📋 1. 発注検討表（直接編集・クリックポップアップ）",
     "🏢 2. 会社（得意先）別 確保データ検索",
     "💻 3. 受注伝票入力（弥生風・複数行一括登録）",
-    "🕒 4. 入荷予定・過去の会議決定履歴"
+    "📋 4. 登録済み伝票一覧（弥生検索風）",
+    "🕒 5. 入荷予定・過去の会議決定履歴"
 ])
 
 with tab1:
@@ -620,7 +630,7 @@ with tab1:
         const histMap = {hist_json};
         let currentModalIdx = null;
 
-        const savedEdits = JSON.parse(localStorage.getItem("hattyu_edits_v1") || "{{}}");
+        const savedEdits = JSON.parse(localStorage.getItem("hattyu_edits_v1"] || "{{}}");
         tableData.forEach(r => {{
             if (savedEdits[r["品番"]]) {{
                 r["入荷予定日_ロジザード"] = savedEdits[r["品番"]].ndate ?? r["入荷予定日_ロジザード"];
@@ -896,7 +906,6 @@ with tab3:
 
         st.markdown("##### 📝 受注内訳明細（動画の弥生のように複数行入力できます）")
         
-        # 3行分の明細入力欄を用意
         rows_data = []
         for i in range(1, 4):
             cols = st.columns([2, 1, 2])
@@ -948,6 +957,39 @@ with tab3:
     st.markdown("</div>", unsafe_allow_html=True)
 
 with tab4:
+    st.subheader("📋 登録済み伝票一覧（弥生販売 受注伝票検索風）")
+    st.info("💡 ここでシステムに登録したすべての受注伝票の確認や、不要なデータの削除が行えます。")
+    
+    if os.path.exists(MANUAL_YAYOI_CSV):
+        df_manual_view = pd.read_csv(MANUAL_YAYOI_CSV).fillna("")
+        if not df_manual_view.empty:
+            # 検索フィルター
+            search_box = st.text_input("🔍 受注番号・得意先名・品番で検索", placeholder="例: WEB-2026 / アマゾン")
+            if search_box:
+                df_manual_view = df_manual_view[
+                    df_manual_view["受注番号"].astype(str).str.contains(search_box, case=False, na=False) |
+                    df_manual_view["得意先名"].astype(str).str.contains(search_box, case=False, na=False) |
+                    df_manual_view["商品コード"].astype(str).str.contains(search_box, case=False, na=False)
+                ]
+
+            st.dataframe(df_manual_view[["受注番号", "受注日", "納入期日", "得意先名", "商品コード", "受注残数", "担当者名", "備考"]], hide_index=True, use_container_width=True, height=400)
+            
+            # 削除用セクション
+            with st.expander("🗑️ 登録済みデータを削除する（修正用）"):
+                del_order_no = st.selectbox("削除する受注番号を選択", options=df_manual_view["受注番号"].unique().tolist())
+                if st.button("🚨 選択した受注番号のデータを削除する", type="primary"):
+                    df_all_man = pd.read_csv(MANUAL_YAYOI_CSV)
+                    df_filtered = df_all_man[df_all_man["受注番号"].astype(str) != str(del_order_no)]
+                    df_filtered.to_csv(MANUAL_YAYOI_CSV, index=False, encoding="utf-8-sig")
+                    st.cache_data.clear()
+                    st.success(f"✅ 受注番号『{del_order_no}』のデータを削除しました！")
+                    st.rerun()
+        else:
+            st.info("現在、WEBから手動登録された伝票はありません。")
+    else:
+        st.info("現在、WEBから手動登録された伝票はありません。")
+
+with tab5:
     ch1, ch2 = st.columns(2)
     with ch1:
         st.subheader("🚢 入荷予定あり・発注済みの商品一覧")
