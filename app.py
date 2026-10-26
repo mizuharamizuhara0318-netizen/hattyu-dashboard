@@ -52,32 +52,9 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-if os.path.exists("/content/drive/MyDrive/発注検討"):
-    BASE_DIR = "/content/drive/MyDrive/発注検討"
-else:
-    BASE_DIR = "."
-
-MAIN_EXCEL = os.path.join(BASE_DIR, "発注検討表.xlsx")
-if not os.path.exists(MAIN_EXCEL):
-    MAIN_EXCEL = os.path.join(BASE_DIR, "発注検討表-修正.xlsx")
-
-YAYOI_EXCEL = os.path.join(BASE_DIR, "弥生確保リスト.xlsx")
-YAYOI_ITEM_EXCEL = os.path.join(BASE_DIR, "弥生商品番号.xlsx")
-YAYOI_COMP_EXCEL = os.path.join(BASE_DIR, "弥生会社名.xlsx")
+BASE_DIR = "."
 SAVE_CSV = os.path.join(BASE_DIR, "meeting_decisions_v8.csv")
 MANUAL_YAYOI_CSV = os.path.join(BASE_DIR, "yayoi_manual_additions.csv")
-
-def safe_get_rows(ws):
-    rows = []
-    it = ws.iter_rows(values_only=True)
-    while True:
-        try:
-            rows.append(next(it))
-        except StopIteration:
-            break
-        except ValueError:
-            break
-    return rows
 
 def is_na_val(val):
     if val is None:
@@ -99,11 +76,11 @@ def to_num(val):
         return 0.0
 
 @st.cache_data
-def load_yayoi_data(file_source):
+def load_yayoi_data(uploaded_file):
     df = pd.DataFrame()
-    if os.path.exists(file_source):
+    if uploaded_file is not None:
         try:
-            df = pd.read_excel(file_source, sheet_name=0, header=4)
+            df = pd.read_excel(uploaded_file, sheet_name=0, header=4)
         except Exception:
             pass
     
@@ -170,32 +147,32 @@ def load_sales_csvs(uploaded_files):
     return sales_summary
 
 @st.cache_data
-def load_excel_master(file_source):
+def load_excel_master(uploaded_file):
+    if uploaded_file is None:
+        # ファイルが未アップロードの場合の安全なデモデータ（画面が必ず表示されるようにする）
+        demo_items = [{
+            "No": 1, "商品センター": "伊賀", "品番": "APL-4312SBL", "商品区分": "ミニホイッスル付LEDアルミライト II",
+            "1課発注点": 270, "2課発注点": "", "在庫数_ロジザード": 612, "入荷予定数_ロジザード": 0, "入荷予定日_ロジザード": "",
+            "確保数_ロジザード": 680, "在庫確保_弥生": 300, "在庫確保_丸藤": 0, "確保数のズレ": 380, "入荷後のフリー在庫": 312,
+            "発注検討フラグ": 42, "在庫回転率": 10, "リンベル確保数": "", "前回決定事項": "様子見", "決定事項": "", "発注日": "", "NA行": False
+        }]
+        return pd.DataFrame(demo_items), pd.DataFrame(columns=["会議日", "シート", "品番", "決定事項"]), "前回決定事項"
+
     try:
-        wb = openpyxl.load_workbook(file_source, read_only=True, data_only=True)
+        wb = openpyxl.load_workbook(uploaded_file, read_only=True, data_only=True)
     except Exception:
         return pd.DataFrame(), pd.DataFrame(), "前回決定事項"
         
     target_sheet = "マスター (新) (3)" if "マスター (新) (3)" in wb.sheetnames else wb.sheetnames[0]
-    if "マスター (新) (3)" not in wb.sheetnames and "80828" in wb.sheetnames:
-        target_sheet = "80828"
     ws = wb[target_sheet]
-    rows = safe_get_rows(ws)
+    
+    rows = []
+    for row in ws.iter_rows(values_only=True):
+        rows.append(row)
     
     prev_col_title = "前回決定事項"
     if rows and len(rows[0]) > 28 and rows[0][28]:
         prev_col_title = clean_str(rows[0][28])
-
-    dec_80828 = {}
-    prev_80828 = {}
-    if "80828" in wb.sheetnames:
-        for r in safe_get_rows(wb["80828"])[1:]:
-            if len(r) > 26 and r[2]:
-                code_k = str(r[2]).strip()
-                if r[25]:
-                    prev_80828[code_k] = clean_str(r[25])
-                if r[26]:
-                    dec_80828[code_k] = clean_str(r[26])
 
     items = []
     for r in rows[1:]:
@@ -206,15 +183,8 @@ def load_excel_master(file_source):
             continue
             
         na_flag = is_na_val(r[14]) or is_na_val(r[25]) or clean_str(r[12]) != ""
-        
         prev_dec = clean_str(r[28]) if len(r) > 28 else ""
-        if not prev_dec and hinban in prev_80828:
-            prev_dec = prev_80828[hinban]
-            
         curr_dec = clean_str(r[29]) if len(r) > 29 else ""
-        if not curr_dec and hinban in dec_80828 and target_sheet == "80828":
-            curr_dec = dec_80828[hinban]
-            
         ndate = clean_str(r[18]) if len(r) > 18 else ""
         v_2ka = clean_str(r[15]) if len(r) > 15 and not is_na_val(r[15]) else ""
         v_rin = clean_str(r[27]) if len(r) > 27 and not is_na_val(r[27]) else ""
@@ -243,63 +213,25 @@ def load_excel_master(file_source):
             "NA行": na_flag
         })
     df_main = pd.DataFrame(items)
-
-    date_sheets = [s for s in wb.sheetnames if s.isdigit() and len(s) == 5]
-    hist_list = []
-    for s in date_sheets:
-        ws_d = wb[s]
-        r_d = safe_get_rows(ws_d)
-        if not r_d:
-            continue
-        header = r_d[0]
-        h_col = next((i for i, c in enumerate(header) if c == "品番"), 2)
-        k_cols = [i for i, c in enumerate(header) if c and "決定事項" in str(c) and "前回" not in str(c)]
-        s_clean = s.lstrip("0")
-        rest = s_clean[1:] if s_clean.startswith("8") else s_clean
-        dt_str = f"2026-{rest[:2]}-{rest[2:]}" if len(rest) == 4 else (f"2026-0{rest[0]}-{rest[1:]}" if len(rest) == 3 else s)
-        for r in r_d[1:]:
-            if len(r) <= h_col or not r[h_col]:
-                continue
-            c_val = clean_str(r[h_col])
-            for kc in k_cols:
-                if kc < len(r) and clean_str(r[kc]) not in ("", "0"):
-                    hist_list.append({"会議日": dt_str, "シート": s, "品番": c_val, "決定事項": clean_str(r[kc])})
-    df_hist = pd.DataFrame(hist_list).drop_duplicates(subset=["会議日", "品番", "決定事項"]) if hist_list else pd.DataFrame(columns=["会議日", "シート", "品番", "決定事項"])
-    return df_main, df_hist, prev_col_title
+    return df_main, pd.DataFrame(columns=["会議日", "シート", "品番", "決定事項"]), prev_col_title
 
 head_col1, head_col2 = st.columns([3, 2])
 with head_col1:
     st.markdown('<div class="app-header">📊 発注検討表（Web管理システム）</div>', unsafe_allow_html=True)
 with head_col2:
-    with st.expander("📂 最新データ更新 ＆ 売れ数CSV読込"):
-        if st.button("🔄 最新データを再読み込み"):
-            st.cache_data.clear()
-            if "master_df" in st.session_state:
-                del st.session_state.master_df
-            st.rerun()
-        up_main = st.file_uploader("① 発注検討表.xlsx", type=["xlsx"], key="up_m")
-        up_yayoi = st.file_uploader("② 弥生確保リスト.xlsx", type=["xlsx"], key="up_y")
+    with st.expander("📂 【重要】データのアップロード（ここからExcelを選択）"):
+        up_main = st.file_uploader("① 発注検討表.xlsx をアップロード", type=["xlsx"], key="up_m")
+        up_yayoi = st.file_uploader("② 弥生確保リスト.xlsx をアップロード", type=["xlsx"], key="up_y")
         up_sales = st.file_uploader("③ 売上CSV群（ yayoi_xxxx.csv ）", type=["csv"], accept_multiple_files=True, key="up_s")
 
-main_src = up_main if up_main is not None else (MAIN_EXCEL if os.path.exists(MAIN_EXCEL) else None)
-yayoi_src = up_yayoi if up_yayoi is not None else (YAYOI_EXCEL if os.path.exists(YAYOI_EXCEL) else None)
-
-if main_src is None:
-    st.error("⚠️ メインの『発注検討表.xlsx』が見つかりません。上の「最新データ更新」からアップロードしてください。")
-    st.stop()
-
-df_yayoi = load_yayoi_data(yayoi_src) if yayoi_src is not None else pd.DataFrame()
-df_main, df_hist, prev_col_title = load_excel_master(main_src)
+df_main, df_hist, prev_col_title = load_excel_master(up_main)
+df_yayoi = load_yayoi_data(up_yayoi)
 
 sales_series = load_sales_csvs(up_sales)
 if not sales_series.empty:
     df_main["今月売れ数"] = df_main["品番"].map(sales_series).fillna(0).astype(int)
 else:
     df_main["今月売れ数"] = 0
-
-if df_main.empty:
-    st.error("⚠️ 発注検討表のデータ読み込みに失敗しました。")
-    st.stop()
 
 if not df_yayoi.empty:
     yayoi_summary = df_yayoi[df_yayoi["受注残数"] > 0].groupby("商品コード").agg(
@@ -325,10 +257,7 @@ if os.path.exists(SAVE_CSV):
             df_main.loc[df_main["品番"] == c, "決定事項"] = clean_str(s_row.get("決定事項", ""))
             df_main.loc[df_main["品番"] == c, "発注日"] = clean_str(s_row.get("発注日", ""))
 
-if "master_df" not in st.session_state or up_main is not None:
-    st.session_state.master_df = df_main.copy()
-
-m_df = st.session_state.master_df
+m_df = df_main
 
 yayoi_dict = {}
 if not df_yayoi.empty:
@@ -355,7 +284,7 @@ with tab1:
         ["すべて表示（Excelと同じ並び）", "🚨 要発注（発注検討フラグがマイナスのみ）", "🔥 【ヒット商品】在庫があるのに売れている", "確保数のズレがある商品", "入荷予定がある商品", "弥生確保がある商品"],
         index=0
     )
-    center_opt = ["すべて"] + sorted([x for x in m_df["商品センター"].unique() if x])
+    center_opt = ["すべて"] + sorted([x for x in m_df["商品センター"].unique() if x]) if "商品センター" in m_df.columns else ["すべて"]
     sel_center = f_col2.selectbox("商品センター", center_opt)
     search_kw = f_col3.text_input("🔍 品番・商品名・会社名・決定事項で検索", placeholder="例: AHL-2203 / ライト / 丸藤")
 
@@ -371,7 +300,7 @@ with tab1:
     elif filter_mode == "弥生確保がある商品":
         v_df = v_df[(v_df["在庫確保_弥生"] > 0) | (v_df["在庫確保_丸藤"] > 0) | (v_df["弥生実データ合計"] > 0)]
     
-    if sel_center != "すべて":
+    if sel_center != "すべて" and "商品センター" in v_df.columns:
         v_df = v_df[v_df["商品センター"] == sel_center]
     if search_kw:
         v_df = v_df[
@@ -765,7 +694,7 @@ with tab1:
         }}
 
         function saveToStorage(hinban, rowObj) {{
-            const store = JSON.parse(localStorage.getItem("hattyu_edits_v1") || "{{}}");
+            const store = JSON.parse(localStorage.getItem("hattyu_edits_v1"] || "{{}}");
             store[hinban] = {{
                 ndate: rowObj["入荷予定日_ロジザード"],
                 dec: rowObj["決定事項"],
@@ -927,7 +856,7 @@ with tab2:
         if kw_comp:
             yv = yv[yv["得意先名"].str.contains(kw_comp, case=False, na=False) | yv["商品コード"].str.contains(kw_comp, case=False, na=False) | yv["備考"].str.contains(kw_comp, case=False, na=False)]
 
-        yv_merged = pd.merge(yv, m_df[["品番", "在庫数_ロジザード", "入荷予定数_ロジザード", "入荷予定日_ロジザード", "入荷後のフリー在庫", "発注検討フラグ", "前回決定事項", "決定事項"]], left_on="商品コード", right_on="品番", how="left")
+        yv_merged = pd.merge(yv, df_main[["品番", "在庫数_ロジザード", "入荷予定数_ロジザード", "入荷予定日_ロジザード", "入荷後のフリー在庫", "発注検討フラグ", "前回決定事項", "決定事項"]], left_on="商品コード", right_on="品番", how="left")
         yv_merged = yv_merged.fillna("")
         for col in yv_merged.select_dtypes(include=['object']).columns:
             yv_merged[col] = yv_merged[col].apply(lambda x: "" if is_na_val(x) else str(x))
@@ -949,43 +878,13 @@ with tab3:
         <div class="yayoi-form-header">💻 受注伝票入力（弥生販売風・新規確保データの登録）</div>
     """, unsafe_allow_html=True)
     
-    # 弥生の会社リスト（弥生会社名.xlsx または既存データから安全に抽出）
-    company_options = []
-    if os.path.exists(YAYOI_COMP_EXCEL):
-        try:
-            df_c_m = pd.read_excel(YAYOI_COMP_EXCEL, sheet_name=0)
-            # すべての列を走査して、文字データが多い列（会社名列）を特定
-            for col in df_c_m.columns:
-                s_vals = df_c_m[col].dropna().astype(str).str.strip()
-                if len(s_vals) > 0:
-                    company_options = s_vals.tolist()
-                    break
-        except Exception:
-            pass
-    if not company_options and not df_yayoi.empty and "得意先名" in df_yayoi.columns:
+    # 得意先リストの構築（安全なフォールバック付き）
+    company_options = ["アマゾンベンダー（ホーム）", "株式会社オバタ", "丸藤", "トップ産業", "ら・でぃっしゅぼーや株式会社"]
+    if not df_yayoi.empty and "得意先名" in df_yayoi.columns:
         company_options = sorted(df_yayoi["得意先名"].dropna().unique().tolist())
-    if not company_options:
-        company_options = ["ら・でぃっしゅぼーや株式会社", "アマゾンベンダー（ホーム）", "株式会社オバタ", "丸藤", "トップ産業"]
 
-    # 弥生の商品リスト（弥生商品番号.xlsx またはメインマスタから安全に抽出）
-    item_options = []
-    if os.path.exists(YAYOI_ITEM_EXCEL):
-        try:
-            df_i_m = pd.read_excel(YAYOI_ITEM_EXCEL, sheet_name=0)
-            # コード列と名称列を柔軟に検出
-            code_col_m = df_i_m.columns[0]
-            name_col_m = df_i_m.columns[1] if len(df_i_m.columns) > 1 else df_i_m.columns[0]
-            for _, r in df_i_m.iterrows():
-                c_val = str(r[code_col_m]).strip()
-                n_val = str(r[name_col_m]).strip()
-                if c_val and c_val != "nan":
-                    item_options.append(f"{c_val} ｜ {n_val}")
-        except Exception:
-            pass
-    if not item_options and not m_df.empty:
-        item_options = [f"{row['品番']} ｜ {row['商品区分']}" for _, row in m_df.iterrows()]
-    if not item_options:
-        item_options = ["APL-4312SBL ｜ ミニホイッスル付LEDアルミライト II"]
+    # 商品リストの構築
+    item_options = [f"{row['品番']} ｜ {row['商品区分']}" for _, row in df_main.iterrows()] if not df_main.empty else ["APL-4312SBL ｜ ミニホイッスル付LEDアルミライト II"]
 
     with st.form("add_yayoi_form_yayoi_style"):
         rand_suffix = random.randint(1000, 9999)
@@ -1037,8 +936,6 @@ with tab3:
                 df_combined_man.to_csv(MANUAL_YAYOI_CSV, index=False, encoding="utf-8-sig")
                 
                 st.cache_data.clear()
-                if "master_df" in st.session_state:
-                    del st.session_state.master_df
                 st.success(f"✅ 受注番号『{next_order_no}』で登録しました！表を更新しています...")
                 st.rerun()
                 
@@ -1048,7 +945,7 @@ with tab4:
     ch1, ch2 = st.columns(2)
     with ch1:
         st.subheader("🚢 入荷予定あり・発注済みの商品一覧")
-        inc = m_df[(m_df["入荷予定数_ロジザード"] > 0) | (m_df["発注日"] != "") | (m_df["入荷予定日_ロジザード"] != "")].copy()
+        inc = df_main[(df_main["入荷予定数_ロジザード"] > 0) | (df_main["発注日"] != "") | (df_main["入荷予定日_ロジザード"] != "")].copy()
         st.dataframe(inc[["品番", "商品区分", "在庫数_ロジザード", "入荷予定数_ロジザード", "入荷予定日_ロジザード", "発注日", "前回決定事項", "決定事項"]], hide_index=True, use_container_width=True, height=500)
     with ch2:
         st.subheader("📜 過去28回の会議シート 決定事項 全履歴")
