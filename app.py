@@ -5,6 +5,7 @@ import openpyxl
 import datetime
 import os
 import json
+import random
 
 st.set_page_config(page_title="発注検討表（Web管理システム）", layout="wide")
 
@@ -106,16 +107,6 @@ def load_yayoi_data(file_source):
         except Exception:
             pass
     
-    # 弥生商品番号.xlsx や 弥生会社名.xlsx からのマスタ読み込み補助
-    company_list = []
-    if os.path.exists(YAYOI_COMP_EXCEL):
-        try:
-            df_comp = pd.read_excel(YAYOI_COMP_EXCEL, sheet_name=0)
-            col_c = next((c for c in df_comp.columns if "会社" in str(c) or "得意先" in str(c) or "名称" in str(c)), df_comp.columns[0])
-            company_list = df_comp[col_c].dropna().astype(str).str.strip().tolist()
-        except Exception:
-            pass
-
     if not df.empty and "商品コード" in df.columns:
         df = df[df["商品コード"].notna()].copy()
         df["商品コード"] = df["商品コード"].astype(str).str.strip()
@@ -705,7 +696,7 @@ with tab1:
         const histMap = {hist_json};
         let currentModalIdx = null;
 
-        const savedEdits = JSON.parse(localStorage.getItem("hattyu_edits_v1") || "{{}}");
+        const savedEdits = JSON.parse(localStorage.getItem("hattyu_edits_v1"] || "{{}}");
         tableData.forEach(r => {{
             if (savedEdits[r["品番"]]) {{
                 r["入荷予定日_ロジザード"] = savedEdits[r["品番"]].ndate ?? r["入荷予定日_ロジザード"];
@@ -958,7 +949,7 @@ with tab3:
         <div class="yayoi-form-header">💻 受注伝票入力（弥生販売風・新規確保データの登録）</div>
     """, unsafe_allow_html=True)
     
-    # 弥生会社名.xlsx から会社リストを取得、なければ既存データから取得
+    # 1. 弥生会社名.xlsx から会社リストを読み込み
     company_options = []
     if os.path.exists(YAYOI_COMP_EXCEL):
         try:
@@ -972,7 +963,7 @@ with tab3:
     if not company_options:
         company_options = ["アマゾンベンダー（ホーム）", "株式会社オバタ", "丸藤", "トップ産業"]
 
-    # 弥生商品番号.xlsx から商品コードと商品名リストを取得
+    # 2. 弥生商品番号.xlsx から商品リストを読み込み
     item_options = []
     item_dict = {}
     if os.path.exists(YAYOI_ITEM_EXCEL):
@@ -994,8 +985,9 @@ with tab3:
             item_dict[row['品番']] = row['商品区分']
 
     with st.form("add_yayoi_form_yayoi_style"):
-        # 自動採番される受注番号の表示
-        next_order_no = f"WEB-{datetime.date.today().strftime('%Y%m%d')}-{random_id := str(abs(hash(datetime.datetime.now()))[:4])}"
+        # 自動重複なし受注番号の生成
+        rand_suffix = random.randint(100, 999)
+        next_order_no = f"WEB-{datetime.date.today().strftime('%Y%m%d')}-{rand_suffix}"
         
         f_h1, f_h2, f_h3 = st.columns(3)
         f_h1.text_input("受注番号 (自動発行)", value=next_order_no, disabled=True)
@@ -1021,6 +1013,7 @@ with tab3:
                 st.error("⚠️ 「得意先」と「商品コード」は必須です。")
             else:
                 new_row = {
+                    "受注番号": next_order_no,
                     "得意先名": str(add_comp).strip(),
                     "商品コード": str(add_code).strip(),
                     "受注残数": int(add_qty),
