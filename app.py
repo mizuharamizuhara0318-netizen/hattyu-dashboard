@@ -56,7 +56,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# 1. 送付いただいた『弥生会社名.xlsx (全342社)』『弥生商品番号.xlsx (全1312商品＋U列倉庫)』完全検証済データ
+# 1. 圧縮内蔵データ（バックアップ用）
 # ---------------------------------------------------------
 EMBEDDED_COMP_B64 = (
     "eNqVW0tTI0mS/itYnyizaTPlQ8rUsXemD707Pd221bexOZTtac3Wug8zl92TlAkF4k0Vj6KAEg9BAUJISIAESOLHpCJTOukvrHtERmQqMwKoOmAU+blnhIeH"
@@ -351,8 +351,7 @@ def clean_str(val):
 
 def normalize_code(val):
     s = clean_str(val).upper()
-    s = s.replace(" ", "").replace(" ", "").replace("－", "-").replace("ー", "-").replace("―", "-")
-    return s
+    return s.replace(" ", "").replace(" ", "").replace("－", "-").replace("ー", "-").replace("―", "-")
 
 def to_num(val):
     if is_na_val(val):
@@ -367,7 +366,7 @@ def to_num(val):
 def load_company_master(file_source):
     loaded = []
     seen = set()
-    if file_source is not None:
+    if file_source and os.path.exists(file_source):
         try:
             df_c = pd.read_excel(file_source, sheet_name=0, header=None)
             for idx in range(len(df_c)):
@@ -391,7 +390,7 @@ def load_company_master(file_source):
 def load_item_master(file_source):
     loaded = []
     seen = set()
-    if file_source is not None:
+    if file_source and os.path.exists(file_source):
         try:
             df_i = pd.read_excel(file_source, sheet_name=0, header=None)
             for idx in range(len(df_i)):
@@ -591,9 +590,6 @@ def load_yayoi_data(file_source):
 
 @st.cache_data
 def load_sales_csvs(uploaded_files, valid_norm_codes_tuple):
-    """
-    売上CSV群（yayoi_xxxx.csv）の全行・全列を解析し、ASC-001等の商品コードと売上数量を1件も漏らさず正確に集計する。
-    """
     valid_codes = set(valid_norm_codes_tuple)
     all_records = []
 
@@ -629,7 +625,6 @@ def load_sales_csvs(uploaded_files, valid_norm_codes_tuple):
 
         loaded_file_count += 1
 
-        # 1. ヘッダー行があるかどうかを先頭10行でチェック
         header_row_idx = None
         code_col_idx = None
         qty_col_idx = None
@@ -663,9 +658,6 @@ def load_sales_csvs(uploaded_files, valid_norm_codes_tuple):
                         all_records.append({"file": os.path.basename(fname), "code_norm": c_norm, "qty": q_v})
             continue
 
-        # 2. ヘッダー無しの弥生販売標準テキスト形式／汎用CSVの場合：
-        # 行ごとにどの列にマスターの品番が入っているかを走査し、その行の「数量」を正確に抽出する
-        # まずファイル全体でどの列が品番列・数量列なのか統計を取る
         col_code_hits = {}
         for col_i in range(df_s.shape[1]):
             col_norms = df_s.iloc[:, col_i].apply(normalize_code)
@@ -680,14 +672,12 @@ def load_sales_csvs(uploaded_files, valid_norm_codes_tuple):
         matched_rows_mask = df_s.iloc[:, best_code_col].apply(normalize_code).isin(valid_codes)
         df_matched = df_s[matched_rows_mask].copy()
 
-        # 品番列より右側にある数値列をすべて数値化して評価
         num_cols = {}
         for q_i in range(best_code_col + 1, min(best_code_col + 14, df_matched.shape[1])):
             s_num = df_matched.iloc[:, q_i].apply(to_num)
             if (s_num != 0).sum() > 0:
                 num_cols[q_i] = s_num
 
-        # 各行について「数量(A) × 単価(B) == 金額(C)」が成り立つ列Aの投票を行う
         col_votes = {q_i: 0 for q_i in num_cols}
         c_keys = sorted(num_cols.keys())
         for idx_a in range(len(c_keys)):
@@ -695,7 +685,6 @@ def load_sales_csvs(uploaded_files, valid_norm_codes_tuple):
                 for idx_c in range(idx_b + 1, len(c_keys)):
                     ca, cb, cc = c_keys[idx_a], c_keys[idx_b], c_keys[idx_c]
                     va, vb, vc = num_cols[ca], num_cols[cb], num_cols[cc]
-                    # 単価(vb)が20円以上、数量(va)が1以上、金額(vc)が20円以上で va * vb == vc
                     valid_m = (va != 0) & (vb >= 20) & (vc != 0) & ((va * vb - vc).abs() <= 2)
                     col_votes[ca] += int(valid_m.sum())
 
@@ -703,15 +692,11 @@ def load_sales_csvs(uploaded_files, valid_norm_codes_tuple):
         if col_votes and max(col_votes.values()) > 0:
             best_qty_col = max(col_votes, key=col_votes.get)
         else:
-            # 金額＝数量×単価の列セットがないCSV（数量のみ、または入数＋数量など）の場合
-            # 弥生標準では [商品コード, 商品名, 課税区分, 単位, 入数, ケース, 数量] 等になるため、
-            # 全て同じ値（課税区分1や2、入数0や1）の列を除外し、数量列を選ぶ
             for cand_col in c_keys:
                 s_cand = num_cols[cand_col]
                 non_zero = s_cand[s_cand != 0]
                 if len(non_zero) == 0:
                     continue
-                # 単価・金額のような大きな値ばかり（中央値が1500以上）の列は除外
                 if non_zero.median() > 1500:
                     continue
                 best_qty_col = cand_col
@@ -744,8 +729,8 @@ with head_col2:
         up_main = u_c1.file_uploader("📋 発注検討表.xlsx", type=["xlsx"], key="up_m")
         up_yayoi = u_c2.file_uploader("📑 弥生確保リスト.xlsx", type=["xlsx"], key="up_y")
         u_c3, u_c4 = st.columns(2)
-        up_comp = u_c3.file_uploader("🏢 弥生会社名.xlsx (342社内蔵済)", type=["xlsx"], key="up_comp")
-        up_item = u_c4.file_uploader("📦 弥生商品番号.xlsx (1312点内蔵済)", type=["xlsx"], key="up_item")
+        up_comp = u_c3.file_uploader("🏢 弥生会社名.xlsx", type=["xlsx"], key="up_comp")
+        up_item = u_c4.file_uploader("📦 弥生商品番号.xlsx", type=["xlsx"], key="up_item")
         if st.button("🔄 最新状態に再読み込み", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
@@ -764,7 +749,7 @@ if df_main.empty:
     st.error("⚠️ 『発注検討表.xlsx』が見つかりません。右上の「📂 売上CSV ＆ 最新Excelの読込・更新」から『発注検討表.xlsx』をアップロードしてください。")
     st.stop()
 
-# 商品コード → U列倉庫・商品名のマッピング辞書（空白は空白のまま保持）
+# 商品コード → U列倉庫・商品名のマッピング辞書
 item_wh_map = {}
 item_name_map = {}
 for it in master_items:
@@ -787,7 +772,6 @@ for _, r in df_main.iterrows():
         item_wh_map[ic_n] = wh_def
         item_name_map[ic] = clean_str(r["商品区分"])
 
-# 売上CSVの集計・マッピング（弥生商品番号.xlsxの全1312コード＋発注検討表の全コードを対象）
 all_valid_norm_codes = tuple(set(df_main["品番_正規化"].unique()) | set(item_name_map.keys()))
 sales_series, sales_file_cnt, df_sales_detail = load_sales_csvs(up_sales, all_valid_norm_codes)
 if not sales_series.empty:
@@ -1350,7 +1334,6 @@ with tab2:
             .click-link {{ color: #0284c7; font-weight: bold; text-decoration: underline; cursor: pointer; }}
             .click-link:hover {{ color: #1d4ed8; }}
 
-            /* 特大ポップアップウィンドウ */
             .modal-overlay {{
                 display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
                 background: rgba(15, 23, 42, 0.7); z-index: 9999; justify-content: center; align-items: center;
@@ -1498,7 +1481,7 @@ with tab2:
         components.html(html_tab2, height=650, scrolling=False)
 
 # =========================================================
-# タブ3：弥生受注伝票（商品コード・商品名・倉庫名を完全分離 ＆ リアルタイム自動入力）
+# タブ3：弥生受注伝票（コード・商品名・倉庫名 分離版 ／ 最大100行）
 # =========================================================
 with tab3:
     max_seq = 0
@@ -1513,9 +1496,7 @@ with tab3:
             pass
     next_order_no_str = f"{max_seq + 1:08d}"
 
-    # 得意先プルダウン（全342社対応・先頭は白紙 ""）
     comp_select_list = [""] + [f"{c['name']}" + (f" （{c['code']}）" if c["code"] else "") for c in master_comps]
-    # 商品コードプルダウン（全1,312点対応・B列のコードのみ格納）
     item_code_list = [""] + [it["code"] for it in master_items]
 
     def create_blank_slip(order_no_val):
@@ -1737,7 +1718,6 @@ with tab3:
         }
     )
 
-    # 商品コードが変更されたら即座に「商品名」と「倉庫名」のセルを埋めて画面に反映する
     need_sync = False
     synced_rows = []
     for _, r_g in raw_edited_grid.iterrows():
