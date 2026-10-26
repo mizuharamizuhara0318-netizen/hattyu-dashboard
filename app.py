@@ -8,7 +8,6 @@ import json
 
 st.set_page_config(page_title="発注検討表（Web管理システム）", layout="wide")
 
-# 上部の文字切れを完全に防ぐ余白・ヘッダー調整CSS
 st.markdown("""
 <style>
     header[data-testid="stHeader"] {
@@ -101,7 +100,6 @@ def load_yayoi_data(file_source):
         df["担当者名"] = df["担当者名"].apply(clean_str)
     else:
         df["担当者名"] = ""
-    # 受注日の最新順（降順）にソート
     df = df.sort_values(by=["受注日_dt", "納入期日_dt"], ascending=[False, False], na_position="last")
     return df
 
@@ -118,7 +116,6 @@ def load_excel_master(file_source):
     ws = wb[target_sheet]
     rows = safe_get_rows(ws)
     
-    # AC列（インデックス28）のヘッダー名を取得（例: 前回決定事項 (8/28)）
     prev_col_title = "前回決定事項"
     if rows and len(rows[0]) > 28 and rows[0][28]:
         prev_col_title = clean_str(rows[0][28])
@@ -144,7 +141,6 @@ def load_excel_master(file_source):
             
         na_flag = is_na_val(r[14]) or is_na_val(r[25]) or clean_str(r[12]) != ""
         
-        # AC列（r[28]）＝前回決定事項、AD列（r[29]）＝決定事項
         prev_dec = clean_str(r[28]) if len(r) > 28 else ""
         if not prev_dec and hinban in prev_80828:
             prev_dec = prev_80828[hinban]
@@ -209,9 +205,18 @@ head_col1, head_col2 = st.columns([3, 2])
 with head_col1:
     st.markdown('<div class="app-header">📊 発注検討表（直接編集 ＆ 弥生確保連動システム）</div>', unsafe_allow_html=True)
 with head_col2:
-    with st.expander("📂 最新Excelデータの差し替え（会議前のデータ更新用）"):
-        up_main = st.file_uploader("① 発注検討表.xlsx をアップロード", type=["xlsx"], key="up_m")
-        up_yayoi = st.file_uploader("② 弥生確保リスト.xlsx をアップロード", type=["xlsx"], key="up_y")
+    with st.expander("📂 最新データの更新・ドライブ再読み込み"):
+        if st.button("🔄 ドライブ / ローカルから最新データを再読み込み"):
+            st.cache_data.clear()
+            if "master_df" in st.session_state:
+                del st.session_state.master_df
+            st.rerent = getattr(st, "rerun", None)
+            if st.rerent:
+                st.rerent()
+            else:
+                st.experimental_rerun()
+        up_main = st.file_uploader("① 発注検討表.xlsx を手動アップロード", type=["xlsx"], key="up_m")
+        up_yayoi = st.file_uploader("② 弥生確保リスト.xlsx を手動アップロード", type=["xlsx"], key="up_y")
 
 main_src = up_main if up_main is not None else (MAIN_EXCEL if os.path.exists(MAIN_EXCEL) else None)
 yayoi_src = up_yayoi if up_yayoi is not None else (YAYOI_EXCEL if os.path.exists(YAYOI_EXCEL) else None)
@@ -256,7 +261,6 @@ if "master_df" not in st.session_state or up_main is not None:
 
 m_df = st.session_state.master_df
 
-# ポップアップ用データの辞書化（受注日の最新順ソート済みを維持）
 yayoi_dict = {}
 if not df_yayoi.empty:
     for code, grp in df_yayoi.groupby("商品コード", sort=False):
@@ -278,7 +282,7 @@ with tab1:
     f_col1, f_col2, f_col3 = st.columns([2.2, 1.5, 3])
     filter_mode = f_col1.selectbox(
         "表示絞り込み",
-        ["すべて表示（Excelと同じ並び）", "⚠️発注検討フラグがマイナスのみ", "確保数のズレがある商品", "入荷予定がある商品", "弥生確保がある商品"],
+        ["すべて表示（Excelと同じ並び）", "🚨 要発注（発注検討フラグがマイナスのみ）", "確保数のズレがある商品", "入荷予定がある商品", "弥生確保がある商品"],
         index=0
     )
     center_opt = ["すべて"] + sorted([x for x in m_df["商品センター"].unique() if x])
@@ -286,7 +290,7 @@ with tab1:
     search_kw = f_col3.text_input("🔍 品番・商品名・会社名・決定事項で検索", placeholder="例: AHL-2203 / ライト / 丸藤")
 
     v_df = m_df.copy()
-    if filter_mode == "⚠️発注検討フラグがマイナスのみ":
+    if filter_mode == "🚨 要発注（発注検討フラグがマイナスのみ）":
         v_df = v_df[(v_df["発注検討フラグ"] < 0) & (~v_df["NA行"])]
     elif filter_mode == "確保数のズレがある商品":
         v_df = v_df[v_df["確保数のズレ"] != 0]
@@ -382,14 +386,12 @@ with tab1:
         }}
         .red-txt {{ color: #e11d48; font-weight: bold; font-size: 11px; }}
         
-        /* 左側4列（No, センター, 品番140px, 商品区分）の横スクロール固定 */
         .sticky-col-1 {{ position: sticky; left: 0px; z-index: 5; background: #fff; }}
         .sticky-col-2 {{ position: sticky; left: 45px; z-index: 5; background: #fff; }}
         .sticky-col-3 {{ position: sticky; left: 115px; z-index: 5; background: #fff; }}
         .sticky-col-4 {{ position: sticky; left: 255px; z-index: 5; background: #fff; border-right: 2px solid #64748b; }}
         thead th.sticky-col-1, thead th.sticky-col-2, thead th.sticky-col-3, thead th.sticky-col-4 {{ z-index: 15; }}
 
-        /* 品番は1行表示（折り返し禁止）で140px確保 */
         .w-no {{ width: 45px; min-width: 45px; max-width: 45px; text-align: center; white-space: nowrap; }}
         .w-center {{ width: 70px; min-width: 70px; max-width: 70px; text-align: center; white-space: nowrap; }}
         .w-code {{ width: 140px; min-width: 140px; max-width: 140px; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
@@ -399,7 +401,6 @@ with tab1:
         .w-prev-dec {{ width: 170px; min-width: 170px; max-width: 170px; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
         .w-dec {{ width: 230px; min-width: 230px; max-width: 230px; text-align: left; }}
 
-        /* Excelと同じセル背景色 */
         .bg-cyan {{ background-color: #67e8f9 !important; }}
         .bg-flag-neg {{ background-color: #fecdd3 !important; color: #be123c; font-weight: bold; }}
         .bg-green {{ background-color: #a3e635 !important; }}
@@ -407,7 +408,6 @@ with tab1:
         .bg-yellow-ro {{ background-color: #fef08a !important; color: #1e293b; }}
         .bg-yellow-edit {{ background-color: #ffff00 !important; }}
         
-        /* NA行（廃盤など）のダークグレー表示 */
         tr.na-row td {{ background-color: #4b5563 !important; color: #f3f4f6 !important; }}
         tr.na-row td .click-link {{ color: #93c5fd !important; }}
         
@@ -438,7 +438,6 @@ with tab1:
             background: #fff;
         }}
 
-        /* スマレジ風モーダルポップアップ */
         .modal-overlay {{
             display: none;
             position: fixed;
@@ -571,7 +570,6 @@ with tab1:
         </table>
     </div>
 
-    <!-- スマレジ風ポップアップウィンドウ -->
     <div class="modal-overlay" id="detail-modal" onclick="closeModalOnBg(event)">
         <div class="modal-window">
             <div class="modal-header">
@@ -726,7 +724,6 @@ with tab1:
             document.getElementById("modal-input-dec").value = r["決定事項"] || "";
             document.getElementById("modal-input-odate").value = r["発注日"] || "";
 
-            // 弥生確保テーブル（受注日の最新順でソートして表示）
             const rawYList = yayoiMap[code] || [];
             const yList = [...rawYList].sort((a, b) => (b["受注日"] || "").localeCompare(a["受注日"] || ""));
             if (yList.length === 0) {{
@@ -750,7 +747,6 @@ with tab1:
                 document.getElementById("modal-yayoi-area").innerHTML = yHtml;
             }}
 
-            // 過去履歴テーブル（最新順）
             const hList = histMap[code] || [];
             if (hList.length === 0) {{
                 document.getElementById("modal-hist-area").innerHTML = `<div style="padding:12px; color:#64748b; background:#f8fafc; border-radius:4px;">過去の会議シートに決定事項の履歴はありません。</div>`;
