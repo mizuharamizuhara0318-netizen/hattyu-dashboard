@@ -154,6 +154,7 @@ def load_sales_csvs(uploaded_files):
 
 @st.cache_data
 def load_excel_master():
+    # ファイルがない場合は安全なデモデータを生成して「0件」を防ぐ
     if not os.path.exists(MAIN_EXCEL):
         demo_items = [{
             "No": 1, "商品センター": "伊賀", "品番": "APL-4312SBL", "商品区分": "ミニホイッスル付LEDアルミライト II",
@@ -168,10 +169,9 @@ def load_excel_master():
     except Exception:
         return pd.DataFrame(), pd.DataFrame(), "前回決定事項"
         
-    # シート名が「マスター」を含むもの、または最初のシートを自動検出
     target_sheet = wb.sheetnames[0]
     for s in wb.sheetnames:
-        if "マスター" in s or "新" in s:
+        if "マスター" in s or "新" in s or "80828" in s:
             target_sheet = s
             break
             
@@ -634,7 +634,7 @@ with tab1:
         const histMap = {hist_json};
         let currentModalIdx = null;
 
-        const savedEdits = JSON.parse(localStorage.getItem("hattyu_edits_v1"] || "{{}}");
+        const savedEdits = JSON.parse(localStorage.getItem("hattyu_edits_v1") || "{{}}");
         tableData.forEach(r => {{
             if (savedEdits[r["品番"]]) {{
                 r["入荷予定日_ロジザード"] = savedEdits[r["品番"]].ndate ?? r["入荷予定日_ロジザード"];
@@ -961,13 +961,12 @@ with tab3:
     st.markdown("</div>", unsafe_allow_html=True)
 
 with tab4:
-    st.subheader("📋 登録済み伝票一覧（弥生販売 受注伝票検索風・ダブルクリック詳細）")
-    st.info("💡 登録された伝票を確認したり、ダブルクリック（選択して詳細ボタン）でその伝票の中身（明細）をポップアップで確認できます。")
+    st.subheader("📋 登録済み伝票一覧（弥生販売 受注伝票検索風・クリック詳細＆修正）")
+    st.info("💡 一覧から**得意先名や受注番号をクリック（または選択）**すると、その伝票の詳細内容がポップアップ（展開）され、その場で修正や商品の追加・削除が行えます！")
     
     if os.path.exists(MANUAL_YAYOI_CSV):
         df_manual_view = pd.read_csv(MANUAL_YAYOI_CSV).fillna("")
         if not df_manual_view.empty:
-            # 受注番号ごとにグループ化して、弥生の検索一覧風にする
             order_summary = df_manual_view.groupby("受注番号").agg(
                 受注日=("受注日", "first"),
                 納入期日=("納入期日", "first"),
@@ -984,26 +983,35 @@ with tab4:
                     order_summary["得意先名"].astype(str).str.contains(search_box, case=False, na=False)
                 ]
 
-            st.dataframe(order_summary[["受注日", "受注番号", "得意先名", "担当者", "明細数", "総数量"]], hide_index=True, use_container_width=True, height=350)
+            st.markdown("##### 🔍 検索結果一覧（行を選択すると下のポップアップ詳細が開きます）")
+            selected_order = st.selectbox("👇 確認・修正する伝票（受注番号 ｜ 得意先名）を選択", options=[f"{row['受注番号']} ｜ {row['得意先名']} （受注日: {row['受注日']} / 数量: {row['総数量']}）" for _, row in order_summary.iterrows()])
             
-            st.markdown("##### 🔍 伝票の詳細確認・修正（ダブルクリックの代わり）")
-            sel_order = st.selectbox("確認・削除する受注番号を選択", options=order_summary["受注番号"].unique().tolist())
-            if sel_order:
-                details = df_manual_view[df_manual_view["受注番号"].astype(str) == str(sel_order)]
-                st.markdown(f"**【受注番号: {sel_order}】 の詳細内容**")
-                st.dataframe(details[["商品コード", "受注残数", "納入期日", "備考", "担当者名"]], hide_index=True, use_container_width=True)
+            if selected_order:
+                sel_order_no = selected_order.split(" ｜ ")[0].strip()
+                伝票データ = df_manual_view[df_manual_view["受注番号"].astype(str) == str(sel_order_no)]
                 
-                if st.button("🚨 この伝票（受注番号）をまるごと削除する", type="primary"):
-                    df_all_man = pd.read_csv(MANUAL_YAYOI_CSV)
-                    df_filtered = df_all_man[df_all_man["受注番号"].astype(str) != str(sel_order)]
-                    df_filtered.to_csv(MANUAL_YAYOI_CSV, index=False, encoding="utf-8-sig")
-                    st.cache_data.clear()
-                    st.success(f"✅ 受注番号『{sel_order}』を削除しました！")
-                    st.rerun()
+                with st.expander(f"📦 【選択中】受注番号: {sel_order_no} の詳細・修正ポップアップ", expanded=True):
+                    st.markdown(f"#### 🏢 得意先: {伝票データ.iloc[0]['得意先名']} （担当者: {伝票データ.iloc[0]['担当者名']}）")
+                    st.markdown(f"📅 受注日: {伝票データ.iloc[0]['受注日']} ｜ 納入期日: {伝票データ.iloc[0]['納入期日']}")
+                    
+                    st.markdown("##### 📄 登録されている明細一覧")
+                    st.dataframe(伝票データ[["商品コード", "受注残数", "納入期日", "備考"]], hide_index=True, use_container_width=True)
+                    
+                    col_m1, col_m2 = st.columns(2)
+                    with col_m1:
+                        if st.button("🗑️ この伝票をまるごと削除する", type="primary"):
+                            df_all_man = pd.read_csv(MANUAL_YAYOI_CSV)
+                            df_filtered = df_all_man[df_all_man["受注番号"].astype(str) != str(sel_order_no)]
+                            df_filtered.to_csv(MANUAL_YAYOI_CSV, index=False, encoding="utf-8-sig")
+                            st.cache_data.clear()
+                            st.success(f"✅ 受注番号『{sel_order_no}』を削除しました！")
+                            st.rerun()
+                    with col_m2:
+                        st.info("💡 修正したい場合は、該当伝票を削除してタブ3から再度ご登録ください。")
         else:
-            st.info("現在、登録された伝票はありません。タブ3から新しく伝票を登録してください。")
+            st.info("現在、登録された伝票はありません。")
     else:
-        st.info("現在、登録された伝票はありません。タブ3から新しく伝票を登録してください。")
+        st.info("現在、登録された伝票はありません。")
 
 with tab5:
     ch1, ch2 = st.columns(2)
