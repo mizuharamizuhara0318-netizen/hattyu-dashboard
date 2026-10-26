@@ -61,6 +61,8 @@ if not os.path.exists(MAIN_EXCEL):
     MAIN_EXCEL = os.path.join(BASE_DIR, "発注検討表-修正.xlsx")
 
 YAYOI_EXCEL = os.path.join(BASE_DIR, "弥生確保リスト.xlsx")
+YAYOI_ITEM_EXCEL = os.path.join(BASE_DIR, "弥生商品番号.xlsx")
+YAYOI_COMP_EXCEL = os.path.join(BASE_DIR, "弥生会社名.xlsx")
 SAVE_CSV = os.path.join(BASE_DIR, "meeting_decisions_v8.csv")
 MANUAL_YAYOI_CSV = os.path.join(BASE_DIR, "yayoi_manual_additions.csv")
 
@@ -97,36 +99,52 @@ def to_num(val):
 
 @st.cache_data
 def load_yayoi_data(file_source):
-    try:
-        df = pd.read_excel(file_source, sheet_name=0, header=4)
-    except Exception:
-        return pd.DataFrame()
-    df = df[df["商品コード"].notna()].copy()
-    df["商品コード"] = df["商品コード"].astype(str).str.strip()
-    df["得意先名"] = df["得意先名"].apply(lambda x: clean_str(x) if clean_str(x) else "不明")
-    df["受注残数"] = pd.to_numeric(df["受注残数"], errors="coerce").fillna(0).astype(int)
-    df["数量"] = pd.to_numeric(df["数量"], errors="coerce").fillna(0).astype(int)
-    df["受注日_dt"] = pd.to_datetime(df["受注日"], errors="coerce")
-    df["納入期日_dt"] = pd.to_datetime(df["納入期日"], errors="coerce")
-    df["受注日"] = df["受注日_dt"].dt.strftime("%Y-%m-%d").fillna("")
-    df["納入期日"] = df["納入期日_dt"].dt.strftime("%Y-%m-%d").fillna("")
-    df["備考"] = df["備考"].apply(clean_str)
-    df["倉庫名"] = df["倉庫名"].apply(clean_str)
-    df["商品名/摘要"] = df["商品名/摘要"].apply(clean_str)
-    if "担当者名" in df.columns:
-        df["担当者名"] = df["担当者名"].apply(clean_str)
-    else:
-        df["担当者名"] = ""
+    df = pd.DataFrame()
+    if os.path.exists(file_source):
+        try:
+            df = pd.read_excel(file_source, sheet_name=0, header=4)
+        except Exception:
+            pass
     
+    # 弥生商品番号.xlsx や 弥生会社名.xlsx からのマスタ読み込み補助
+    company_list = []
+    if os.path.exists(YAYOI_COMP_EXCEL):
+        try:
+            df_comp = pd.read_excel(YAYOI_COMP_EXCEL, sheet_name=0)
+            col_c = next((c for c in df_comp.columns if "会社" in str(c) or "得意先" in str(c) or "名称" in str(c)), df_comp.columns[0])
+            company_list = df_comp[col_c].dropna().astype(str).str.strip().tolist()
+        except Exception:
+            pass
+
+    if not df.empty and "商品コード" in df.columns:
+        df = df[df["商品コード"].notna()].copy()
+        df["商品コード"] = df["商品コード"].astype(str).str.strip()
+        df["得意先名"] = df["得意先名"].apply(lambda x: clean_str(x) if clean_str(x) else "不明")
+        df["受注残数"] = pd.to_numeric(df["受注残数"], errors="coerce").fillna(0).astype(int)
+        df["数量"] = pd.to_numeric(df["数量"], errors="coerce").fillna(0).astype(int)
+        df["受注日_dt"] = pd.to_datetime(df["受注日"], errors="coerce")
+        df["納入期日_dt"] = pd.to_datetime(df["納入期日"], errors="coerce")
+        df["受注日"] = df["受注日_dt"].dt.strftime("%Y-%m-%d").fillna("")
+        df["納入期日"] = df["納入期日_dt"].dt.strftime("%Y-%m-%d").fillna("")
+        df["備考"] = df["備考"].apply(clean_str)
+        df["倉庫名"] = df["倉庫名"].apply(clean_str)
+        df["商品名/摘要"] = df["商品名/摘要"].apply(clean_str)
+        df["担当者名"] = df["担当者名"].apply(clean_str) if "担当者名" in df.columns else ""
+    else:
+        df = pd.DataFrame(columns=["得意先名", "商品コード", "受注残数", "数量", "受注日", "納入期日", "備考", "倉庫名", "担当者名", "受注日_dt", "納入期日_dt"])
+
     if os.path.exists(MANUAL_YAYOI_CSV):
         try:
             df_man = pd.read_csv(MANUAL_YAYOI_CSV).fillna("")
             if not df_man.empty:
+                df_man["受注日_dt"] = pd.to_datetime(df_man["受注日"], errors="coerce")
+                df_man["納入期日_dt"] = pd.to_datetime(df_man["納入期日"], errors="coerce")
                 df = pd.concat([df, df_man], ignore_index=True)
         except Exception:
             pass
 
-    df = df.sort_values(by=["受注日_dt", "納入期日_dt"], ascending=[False, False], na_position="last")
+    if not df.empty:
+        df = df.sort_values(by=["受注日_dt", "納入期日_dt"], ascending=[False, False], na_position="last")
     return df
 
 @st.cache_data
@@ -144,7 +162,6 @@ def load_sales_csvs(uploaded_files):
             except Exception:
                 continue
         
-        # どんな列名構造（商品コード、品番、数量、数など）でも柔軟にヒットさせる
         code_col = next((c for c in df_s.columns if any(k in str(c) for k in ["商品コード", "品番", "コード", "商品"])), None)
         qty_col = next((c for c in df_s.columns if any(k in str(c) for k in ["数量", "数", "残", "受注残"])), None)
         
@@ -153,17 +170,6 @@ def load_sales_csvs(uploaded_files):
             temp["商品コード"] = df_s[code_col].astype(str).str.strip()
             temp["数量"] = pd.to_numeric(df_s[qty_col], errors="coerce").fillna(0)
             all_dfs.append(temp)
-        elif len(df_s.columns) >= 2:
-            # 万が一列名が特殊な場合、2列目を品番、適当な数値を拾うフォールバック
-            temp = pd.DataFrame()
-            temp["商品コード"] = df_s.iloc[:, 1].astype(str).str.strip()
-            # 数値っぽい列を探す
-            for col_idx in range(2, len(df_s.columns)):
-                parsed = pd.to_numeric(df_s.iloc[:, col_idx], errors="coerce")
-                if parsed.sum() > 0:
-                    temp["数量"] = parsed.fillna(0)
-                    all_dfs.append(temp)
-                    break
             
     if not all_dfs:
         return pd.Series(dtype=int)
@@ -282,7 +288,7 @@ with head_col2:
             st.rerun()
         up_main = st.file_uploader("① 発注検討表.xlsx", type=["xlsx"], key="up_m")
         up_yayoi = st.file_uploader("② 弥生確保リスト.xlsx", type=["xlsx"], key="up_y")
-        up_sales = st.file_uploader("③ 売上CSV群（ yayoi_xxxx.csv をまとめて選択可）", type=["csv"], accept_multiple_files=True, key="up_s")
+        up_sales = st.file_uploader("③ 売上CSV群（ yayoi_xxxx.csv ）", type=["csv"], accept_multiple_files=True, key="up_s")
 
 main_src = up_main if up_main is not None else (MAIN_EXCEL if os.path.exists(MAIN_EXCEL) else None)
 yayoi_src = up_yayoi if up_yayoi is not None else (YAYOI_EXCEL if os.path.exists(YAYOI_EXCEL) else None)
@@ -294,7 +300,6 @@ if main_src is None:
 df_yayoi = load_yayoi_data(yayoi_src) if yayoi_src is not None else pd.DataFrame()
 df_main, df_hist, prev_col_title = load_excel_master(main_src)
 
-# 売上CSVのデータを結合・マッピング
 sales_series = load_sales_csvs(up_sales)
 if not sales_series.empty:
     df_main["今月売れ数"] = df_main["品番"].map(sales_series).fillna(0).astype(int)
@@ -953,36 +958,67 @@ with tab3:
         <div class="yayoi-form-header">💻 受注伝票入力（弥生販売風・新規確保データの登録）</div>
     """, unsafe_allow_html=True)
     
-    # 既存の得意先名一覧＋アマゾン等の主要取引先をプルダウン候補に含める
-    existing_companies = []
-    if not df_yayoi.empty and "得意先名" in df_yayoi.columns:
-        existing_companies = sorted(df_yayoi["得意先名"].unique().tolist())
-    if "アマゾンベンダー（ホーム）" not in existing_companies:
-        existing_companies.insert(0, "アマゾンベンダー（ホーム）")
-    
+    # 弥生会社名.xlsx から会社リストを取得、なければ既存データから取得
+    company_options = []
+    if os.path.exists(YAYOI_COMP_EXCEL):
+        try:
+            df_c_m = pd.read_excel(YAYOI_COMP_EXCEL, sheet_name=0)
+            c_col = next((c for c in df_c_m.columns if any(k in str(c) for k in ["会社", "得意先", "名称", "顧客"])), df_c_m.columns[0])
+            company_options = df_c_m[c_col].dropna().astype(str).str.strip().tolist()
+        except Exception:
+            pass
+    if not company_options and not df_yayoi.empty:
+        company_options = sorted(df_yayoi["得意先名"].unique().tolist())
+    if not company_options:
+        company_options = ["アマゾンベンダー（ホーム）", "株式会社オバタ", "丸藤", "トップ産業"]
+
+    # 弥生商品番号.xlsx から商品コードと商品名リストを取得
+    item_options = []
+    item_dict = {}
+    if os.path.exists(YAYOI_ITEM_EXCEL):
+        try:
+            df_i_m = pd.read_excel(YAYOI_ITEM_EXCEL, sheet_name=0)
+            code_col_m = next((c for c in df_i_m.columns if any(k in str(c) for k in ["コード", "品番", "商品コード"])), df_i_m.columns[0])
+            name_col_m = next((c for c in df_i_m.columns if any(k in str(c) for k in ["名称", "商品名", "品名", "摘要"])), df_i_m.columns[1] if len(df_i_m.columns) > 1 else df_i_m.columns[0])
+            for _, r in df_i_m.iterrows():
+                c_val = str(r[code_col_m]).strip()
+                n_val = str(r[name_col_m]).strip()
+                if c_val and c_val != "nan":
+                    item_options.append(f"{c_val} ｜ {n_val}")
+                    item_dict[c_val] = n_val
+        except Exception:
+            pass
+    if not item_options:
+        item_options = [f"{row['品番']} ｜ {row['商品区分']}" for _, row in m_df.iterrows()]
+        for _, row in m_df.iterrows():
+            item_dict[row['品番']] = row['商品区分']
+
     with st.form("add_yayoi_form_yayoi_style"):
-        f_c1, f_c2, f_c3 = st.columns([2, 2, 1])
+        # 自動採番される受注番号の表示
+        next_order_no = f"WEB-{datetime.date.today().strftime('%Y%m%d')}-{random_id := str(abs(hash(datetime.datetime.now()))[:4])}"
         
-        # 得意先名（プルダウン選択 or 新規直接入力）
-        comp_mode = f_c1.radio("得意先名の入力方法", ["既存一覧から選択", "新規直接入力"], horizontal=True)
-        if comp_mode == "既存一覧から選択":
-            add_comp = f_c2.selectbox("得意先名（会社名）", options=existing_companies if existing_companies else ["(データなし)"])
-        else:
-            add_comp = f_c2.text_input("得意先名（会社名） *", placeholder="例: アマゾンベンダー（ホーム）")
+        f_h1, f_h2, f_h3 = st.columns(3)
+        f_h1.text_input("受注番号 (自動発行)", value=next_order_no, disabled=True)
+        add_date = f_h2.date_input("受注日", value=datetime.date.today())
+        add_limit = f_h3.date_input("納入期日", value=datetime.date.today())
 
-        all_hinban_opts = sorted(m_df["品番"].unique().tolist())
-        add_code = f_c1.selectbox("商品コード（品番） *", options=all_hinban_opts)
-        add_qty = f_c2.number_input("受注残数 / 数量 *", min_value=1, value=1)
+        f_d1, f_d2, f_d3 = st.columns(3)
+        add_comp = f_d1.selectbox("得意先 (会社名)", options=company_options)
+        
+        selected_item_str = f_d2.selectbox("商品コード (品番 ｜ 商品名)", options=item_options)
+        add_code = selected_item_str.split(" ｜ ")[0].strip() if " ｜ " in selected_item_str else selected_item_str.strip()
+        
+        add_qty = f_d3.number_input("受注残数 (数量)", min_value=1, value=1)
 
-        f_c4, f_c5, f_c6 = st.columns(3)
-        add_date = f_c4.date_input("受注日", value=datetime.date.today())
-        add_limit = f_c5.date_input("納入期日", value=datetime.date.today())
-        add_memo = f_c6.text_input("摘要 / 備考", placeholder="例: 11月上旬 / 名古屋DC")
+        f_e1, f_e2 = st.columns(2)
+        staff_options = ["松平", "杉中", "田中", "鈴木", "佐藤"]
+        add_staff = f_e1.selectbox("担当者", options=staff_options)
+        add_memo = f_e2.text_input("摘要 / 備考", placeholder="例: コーポさっぽろ 12/3w")
 
-        submitted = st.form_submit_button("💾 この内容で登録（F12）", type="primary")
+        submitted = st.form_submit_button("💾 伝票を登録する（自動反映）", type="primary")
         if submitted:
             if not add_comp or not add_code:
-                st.error("⚠️ 「得意先名」と「品番」は必須です。")
+                st.error("⚠️ 「得意先」と「商品コード」は必須です。")
             else:
                 new_row = {
                     "得意先名": str(add_comp).strip(),
@@ -994,8 +1030,8 @@ with tab3:
                     "受注日_dt": pd.to_datetime(add_date),
                     "納入期日_dt": pd.to_datetime(add_limit),
                     "備考": str(add_memo).strip(),
-                    "倉庫名": "弥生風入力",
-                    "担当者名": "Webシステム"
+                    "倉庫名": "WEB入力",
+                    "担当者名": str(add_staff).strip()
                 }
                 df_new = pd.DataFrame([new_row])
                 if os.path.exists(MANUAL_YAYOI_CSV):
@@ -1005,11 +1041,10 @@ with tab3:
                     df_combined_man = df_new
                 df_combined_man.to_csv(MANUAL_YAYOI_CSV, index=False, encoding="utf-8-sig")
                 
-                # 自動キャッシュクリア＆ページ再読み込みで即時反映！
                 st.cache_data.clear()
                 if "master_df" in st.session_state:
                     del st.session_state.master_df
-                st.success(f"✅ 『{add_comp}』様の確保データ（品番: {add_code} / 数量: {add_qty}）を登録しました！自動で表に反映します...")
+                st.success(f"✅ 受注番号『{next_order_no}』で登録しました！表を更新しています...")
                 st.rerun()
                 
     st.markdown("</div>", unsafe_allow_html=True)
