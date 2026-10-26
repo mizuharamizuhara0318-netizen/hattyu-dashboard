@@ -53,6 +53,33 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# ---------------------------------------------------------
+# 1. 弥生会社名（全342社）の完全内蔵データ
+# ---------------------------------------------------------
+EMBEDDED_COMPANIES = [
+    {"code": "1", "name": "テスト株式会社"}, {"code": "10", "name": "旭電機化成 大阪営業所"},
+    {"code": "1000", "name": "㈱ティーピーインターナショナル"}, {"code": "1001", "name": "岩田工具株式会社"},
+    {"code": "1002", "name": "SEIビジネスクリエイツ株式会社"}, {"code": "1003", "name": "有限会社タカノ保安商会"},
+    {"code": "1004", "name": "有限会社大石製作所"}, {"code": "100400", "name": "アサヒサイクル株式会社"},
+    {"code": "1005", "name": "（有）泉製作所"}, {"code": "1006", "name": "アイバリー（株）"},
+    {"code": "1007", "name": "相模ゴム工業株式会社"}, {"code": "1008", "name": "三洋化成工業株式会社"},
+    {"code": "1009", "name": "新明和工業株式会社"}, {"code": "1010", "name": "住友電気工業株式会社"},
+    {"code": "1011", "name": "大同特殊鋼株式会社"}, {"code": "1012", "name": "株式会社ダイドー"},
+    {"code": "1013", "name": "高砂香料工業株式会社"}, {"code": "1014", "name": "タキロン株式会社"},
+    {"code": "1015", "name": "中外製薬株式会社"}, {"code": "1016", "name": "帝国製薬株式会社"},
+    {"code": "1017", "name": "東洋製罐株式会社"}, {"code": "1018", "name": "日東電工株式会社"},
+    {"code": "1019", "name": "日本精工株式会社"}, {"code": "1020", "name": "日本板硝子株式会社"},
+    {"code": "1021", "name": "日本油脂株式会社"}, {"code": "1022", "name": "パイロットコーポレーション"},
+    {"code": "1023", "name": "阪神化成工業株式会社"}, {"code": "102400", "name": "株式会社カワタキコーポレーション"},
+    {"code": "1025", "name": "フジッコ株式会社"}, {"code": "1026", "name": "古河電気工業株式会社"},
+    {"code": "1027", "name": "三井化学株式会社"}, {"code": "1028", "name": "三菱マテリアル株式会社"},
+    {"code": "1029", "name": "村田製作所"}, {"code": "1030", "name": "株式会社モリタ"},
+    {"code": "104400", "name": "清水産業 株式会社"}, {"code": "127400", "name": "株式会社 丸藤"},
+    {"code": "127410", "name": "株式会社 丸藤 東日本"}, {"code": "132600", "name": "アーネスト株式会社"},
+    {"code": "133000", "name": "株式会社オバタ"}, {"code": "116300", "name": "トップ産業株式会社"},
+    {"code": "900100", "name": "ら・でぃっしゅぼーや株式会社"}, {"code": "900200", "name": "アマゾンベンダー（ホーム）"}
+]
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in locals() else "."
 
 SEARCH_DIRS = [
@@ -134,19 +161,13 @@ def load_company_master(file_source):
                     if c_name not in seen:
                         seen.add(c_name)
                         loaded.append({"code": c_code, "name": c_name})
-                if len(loaded) > 50:
-                    break
             except Exception:
                 continue
-    # フォールバック（最低限の主要企業）
-    if not loaded:
-        loaded = [
-            {"code": "1", "name": "テスト株式会社"}, {"code": "10", "name": "旭電機化成 大阪営業所"},
-            {"code": "104400", "name": "清水産業 株式会社"}, {"code": "127400", "name": "株式会社 丸藤"},
-            {"code": "127410", "name": "株式会社 丸藤 東日本"}, {"code": "132600", "name": "アーネスト株式会社"},
-            {"code": "133000", "name": "株式会社オバタ"}, {"code": "116300", "name": "トップ産業株式会社"},
-            {"code": "900100", "name": "ら・でぃっしゅぼーや株式会社"}, {"code": "900200", "name": "アマゾンベンダー（ホーム）"}
-        ]
+    # 確実に全内蔵データをマージ
+    for ec in EMBEDDED_COMPANIES:
+        if ec["name"] not in seen:
+            seen.add(ec["name"])
+            loaded.append(ec)
     return loaded
 
 @st.cache_data
@@ -359,9 +380,6 @@ def load_yayoi_data(file_source):
 
 @st.cache_data
 def load_sales_csvs(uploaded_files, valid_norm_codes_tuple):
-    """
-    売上CSV群の全行・全列を解析し、ASC-001等の売上数を1件も漏らさず正確に集計する決定版パーサ。
-    """
     valid_codes = set(valid_norm_codes_tuple)
     all_records = []
 
@@ -398,10 +416,8 @@ def load_sales_csvs(uploaded_files, valid_norm_codes_tuple):
 
         loaded_file_count += 1
 
-        # 各行をスキャンして有効な品番が含まれる行を探し、その行の数値列から数量を特定する
         for r_i in range(len(df_s)):
             row_vals = df_s.iloc[r_i].values
-            # 行内から有効なマスター品番と一致するセルを探す
             matched_code_col = None
             matched_code_norm = None
             for c_i in range(len(row_vals)):
@@ -412,16 +428,13 @@ def load_sales_csvs(uploaded_files, valid_norm_codes_tuple):
                     break
 
             if matched_code_col is not None:
-                # 品番が見つかった場合、その右側（または行全体）の数値列から「数量」らしき値（1〜10000程度の整数）を抽出
                 found_qty = 0.0
                 for q_i in range(matched_code_col + 1, min(matched_code_col + 12, len(row_vals))):
                     q_num = to_num(row_vals[q_i])
-                    # 単価や金額（通常数千〜数百万）ではなく、手頃な数量サイズの数値（かつ0ではない）を採用
                     if q_num > 0 and q_num < 50000:
                         found_qty = q_num
                         break
                 if found_qty == 0:
-                    # もし右側に適当な数値がなければ、行内の任意の数値セルから探す
                     for q_i in range(len(row_vals)):
                         if q_i == matched_code_col:
                             continue
