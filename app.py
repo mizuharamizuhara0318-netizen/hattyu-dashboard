@@ -53,6 +53,9 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# ---------------------------------------------------------
+# 1. ローカルドライブ ＆ ギットハブの自動探索パス
+# ---------------------------------------------------------
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in locals() else "."
 
 SEARCH_DIRS = [
@@ -61,6 +64,7 @@ SEARCH_DIRS = [
     r"G:\マイドライブ\発注検討",
     r"G:\マイドライブ\売上ダッシュボード\済",
     r"G:\マイドライブ\売上ダッシュボード",
+    r"C:\Users\Public\Downloads",
     "/content/drive/MyDrive/発注検討",
     "/content/drive/MyDrive/売上ダッシュボード/済"
 ]
@@ -78,7 +82,7 @@ def find_target_file(keywords, ext=".xlsx"):
     return None
 
 MAIN_EXCEL = find_target_file(["発注検討表"])
-YAYOI_EXCEL = find_target_file(["弥生確保リスト", "確保リスト"])
+YAYOI_EXCEL = find_target_file(["弥生確保リスト", "確保リスト", "弥生"])
 YAYOI_ITEM_EXCEL = find_target_file(["弥生商品番号", "商品番号"])
 YAYOI_COMP_EXCEL = find_target_file(["弥生会社名", "会社名", "得意先"])
 
@@ -138,23 +142,6 @@ def load_company_master(file_source):
                     break
             except Exception:
                 continue
-
-    # 万が一ファイルが見つからない場合のフォールバック（主要企業を網羅）
-    if not loaded:
-        fallback_comps = [
-            {"code": "1", "name": "テスト株式会社"}, {"code": "10", "name": "旭電機化成 大阪営業所"},
-            {"code": "1000", "name": "㈱ティーピーインターナショナル"}, {"code": "1001", "name": "岩田工具株式会社"},
-            {"code": "1002", "name": "SEIビジネスクリエイツ株式会社"}, {"code": "1003", "name": "有限会社タカノ保安商会"},
-            {"code": "1004", "name": "有限会社大石製作所"}, {"code": "104400", "name": "清水産業 株式会社"},
-            {"code": "127400", "name": "株式会社 丸藤"}, {"code": "127410", "name": "株式会社 丸藤 東日本"},
-            {"code": "132600", "name": "アーネスト株式会社"}, {"code": "133000", "name": "株式会社オバタ"},
-            {"code": "116300", "name": "トップ産業株式会社"}, {"code": "900100", "name": "ら・でぃっしゅぼーや株式会社"},
-            {"code": "900200", "name": "アマゾンベンダー（ホーム）"}
-        ]
-        for fc in fallback_comps:
-            if fc["name"] not in seen:
-                seen.add(fc["name"])
-                loaded.append(fc)
     return loaded
 
 @st.cache_data
@@ -944,8 +931,9 @@ with tab1:
                 csv += cols.map(c => `"${{String(r[c] ?? "").replace(/"/g, '""')}}"`).join(",") + "\\n";
             }});
             const blob = new Blob([csv], {{ type: "text/csv;charset=utf-8;" }});
+            const url = URL.createObjectURL(blob);
             const a = document.createElement("a");
-            a.href = URL.createObjectURL(blob);
+            a.href = url;
             a.download = `発注検討表_出力_${{new Date().toISOString().slice(0,10)}}.csv`;
             a.click();
         }}
@@ -961,7 +949,7 @@ with tab1:
 # =========================================================
 with tab2:
     if df_yayoi.empty:
-        st.warning("確保リストのデータがありません。")
+        st.warning("確保リストのデータがありません。『弥生確保リスト.xlsx』が同じフォルダ（またはGitHub）にあるか確認してください。")
     else:
         comp_totals = df_yayoi.groupby("得意先名")["受注残数"].sum().sort_values(ascending=False)
         comp_opts = ["すべての会社を表示"] + [f"{c} （確保合計: {v:,} 個）" for c, v in comp_totals.items()]
