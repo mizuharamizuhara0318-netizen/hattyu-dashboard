@@ -7,7 +7,7 @@ import os
 import json
 import random
 
-st.set_page_config(page_title="発注検討表（Web管理システム）", layout="wide")
+st.set_page_config(page_title="発注検討表（Web管理システム・弥生連動版）", layout="wide")
 
 st.markdown("""
 <style>
@@ -154,26 +154,22 @@ def load_sales_csvs(uploaded_files):
 
 @st.cache_data
 def load_excel_master():
-    # ファイルがない場合は安全なデモデータを生成して「0件」を防ぐ
     if not os.path.exists(MAIN_EXCEL):
-        demo_items = [{
-            "No": 1, "商品センター": "伊賀", "品番": "APL-4312SBL", "商品区分": "ミニホイッスル付LEDアルミライト II",
-            "1課発注点": 270, "2課発注点": "", "在庫数_ロジザード": 612, "入荷予定数_ロジザード": 0, "入荷予定日_ロジザード": "",
-            "確保数_ロジザード": 680, "在庫確保_弥生": 300, "在庫確保_丸藤": 0, "確保数のズレ": 380, "入荷後のフリー在庫": 312,
-            "発注検討フラグ": 42, "在庫回転率": 10, "リンベル確保数": "", "前回決定事項": "様子見", "決定事項": "", "発注日": "", "NA行": False
-        }]
-        return pd.DataFrame(demo_items), pd.DataFrame(columns=["会議日", "シート", "品番", "決定事項"]), "前回決定事項"
+        return pd.DataFrame(), pd.DataFrame(), "前回決定事項"
 
     try:
         wb = openpyxl.load_workbook(MAIN_EXCEL, read_only=True, data_only=True)
     except Exception:
         return pd.DataFrame(), pd.DataFrame(), "前回決定事項"
         
+    # すべてのシートを走査し、データが一番多く入っているマスターシートを自動検出する
     target_sheet = wb.sheetnames[0]
+    max_rows = 0
     for s in wb.sheetnames:
-        if "マスター" in s or "新" in s or "80828" in s:
+        ws_test = wb[s]
+        if ws_test.max_row > max_rows:
+            max_rows = ws_test.max_row
             target_sheet = s
-            break
             
     ws = wb[target_sheet]
     rows = []
@@ -282,7 +278,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📋 1. 発注検討表（直接編集・クリックポップアップ）",
     "🏢 2. 会社（得意先）別 確保データ検索",
     "💻 3. 受注伝票入力（弥生風・複数行一括登録）",
-    "📋 4. 登録済み伝票一覧（弥生検索風・ダブルクリック詳細）",
+    "📋 4. 登録済み伝票一覧（弥生検索風・クリックで詳細表示）",
     "🕒 5. 入荷予定・過去の会議決定履歴"
 ])
 
@@ -634,7 +630,7 @@ with tab1:
         const histMap = {hist_json};
         let currentModalIdx = null;
 
-        const savedEdits = JSON.parse(localStorage.getItem("hattyu_edits_v1") || "{{}}");
+        const savedEdits = JSON.parse(localStorage.getItem("hattyu_edits_v1"] || "{{}}");
         tableData.forEach(r => {{
             if (savedEdits[r["品番"]]) {{
                 r["入荷予定日_ロジザード"] = savedEdits[r["品番"]].ndate ?? r["入荷予定日_ロジザード"];
@@ -961,8 +957,8 @@ with tab3:
     st.markdown("</div>", unsafe_allow_html=True)
 
 with tab4:
-    st.subheader("📋 登録済み伝票一覧（弥生販売 受注伝票検索風・クリック詳細＆修正）")
-    st.info("💡 一覧から**得意先名や受注番号をクリック（または選択）**すると、その伝票の詳細内容がポップアップ（展開）され、その場で修正や商品の追加・削除が行えます！")
+    st.subheader("📋 登録済み伝票一覧（弥生販売 受注伝票検索風・ダブルクリック詳細＆編集）")
+    st.info("💡 一覧から**伝票の行をクリック**すると、動画の弥生受注伝票のようにポップアップが開き、その場で中身を確認・修正・削除できます！")
     
     if os.path.exists(MANUAL_YAYOI_CSV):
         df_manual_view = pd.read_csv(MANUAL_YAYOI_CSV).fillna("")
@@ -976,38 +972,94 @@ with tab4:
                 総数量=("受注残数", "sum")
             ).reset_index().sort_values(by="受注日", ascending=False)
 
-            search_box = st.text_input("🔍 受注番号・得意先名で検索", placeholder="例: WEB-2026 / アマゾン")
+            search_box = st.text_input("🔍 受注番号・得意先名で検索", placeholder="例: WEB-2026 / アマゾン", key="search_ord")
             if search_box:
                 order_summary = order_summary[
                     order_summary["受注番号"].astype(str).str.contains(search_box, case=False, na=False) |
                     order_summary["得意先名"].astype(str).str.contains(search_box, case=False, na=False)
                 ]
 
-            st.markdown("##### 🔍 検索結果一覧（行を選択すると下のポップアップ詳細が開きます）")
-            selected_order = st.selectbox("👇 確認・修正する伝票（受注番号 ｜ 得意先名）を選択", options=[f"{row['受注番号']} ｜ {row['得意先名']} （受注日: {row['受注日']} / 数量: {row['総数量']}）" for _, row in order_summary.iterrows()])
-            
-            if selected_order:
-                sel_order_no = selected_order.split(" ｜ ")[0].strip()
+            # 弥生の検索結果一覧（クリックで選択してポップアップ表示）
+            selected_summary = st.dataframe(
+                order_summary[["受注日", "受注番号", "得意先名", "担当者", "明細数", "総数量"]],
+                hide_index=True,
+                use_container_width=True,
+                height=350,
+                selection_mode="single-row",
+                on_select="rerun"
+            )
+
+            # 選択された行の処理
+            selected_rows = selected_summary.get("selection", {}).get("rows", [])
+            if selected_rows:
+                row_idx = selected_rows[0]
+                sel_order_no = order_summary.iloc[row_idx]["受注番号"]
                 伝票データ = df_manual_view[df_manual_view["受注番号"].astype(str) == str(sel_order_no)]
                 
-                with st.expander(f"📦 【選択中】受注番号: {sel_order_no} の詳細・修正ポップアップ", expanded=True):
-                    st.markdown(f"#### 🏢 得意先: {伝票データ.iloc[0]['得意先名']} （担当者: {伝票データ.iloc[0]['担当者名']}）")
-                    st.markdown(f"📅 受注日: {伝票データ.iloc[0]['受注日']} ｜ 納入期日: {伝票データ.iloc[0]['納入期日']}")
+                # 弥生の受注伝票ウィンドウ風ポップアップ
+                st.markdown(f"""
+                <div style="background:#f8fafc; border:3px solid #1e3a8a; border-radius:8px; padding:20px; margin-top:20px;">
+                    <h3 style="color:#1e3a8a; margin-top:0;">🖥️ 受注伝票詳細ウィンドウ 【受注番号: {sel_order_no}】</h3>
+                """, unsafe_allow_html=True)
+                
+                with st.form(f"edit_form_{sel_order_no}"):
+                    e_col1, e_col2, e_col3 = st.columns(3)
+                    new_date = e_col1.date_input("受注日", value=pd.to_datetime(伝票データ.iloc[0]["受注日"]))
+                    new_limit = e_col2.date_input("納入期日", value=pd.to_datetime(伝票データ.iloc[0]["納入期日"]))
+                    new_staff = e_col3.text_input("担当者名", value=伝票データ.iloc[0]["担当者名"])
                     
-                    st.markdown("##### 📄 登録されている明細一覧")
-                    st.dataframe(伝票データ[["商品コード", "受注残数", "納入期日", "備考"]], hide_index=True, use_container_width=True)
+                    new_comp = st.text_input("得意先名", value=伝票データ.iloc[0]["得意先名"])
                     
-                    col_m1, col_m2 = st.columns(2)
-                    with col_m1:
-                        if st.button("🗑️ この伝票をまるごと削除する", type="primary"):
-                            df_all_man = pd.read_csv(MANUAL_YAYOI_CSV)
-                            df_filtered = df_all_man[df_all_man["受注番号"].astype(str) != str(sel_order_no)]
-                            df_filtered.to_csv(MANUAL_YAYOI_CSV, index=False, encoding="utf-8-sig")
-                            st.cache_data.clear()
-                            st.success(f"✅ 受注番号『{sel_order_no}』を削除しました！")
-                            st.rerun()
-                    with col_m2:
-                        st.info("💡 修正したい場合は、該当伝票を削除してタブ3から再度ご登録ください。")
+                    st.markdown("##### 📦 明細行の確認・修正")
+                    edited_items = []
+                    for idx, d_row in 伝票データ.reset_index().iterrows():
+                        col_i1, col_i2, col_i3 = st.columns([2, 1, 2])
+                        it_code = col_i1.text_input(f"品番 #{idx+1}", value=d_row["商品コード"], key=f"ec_{sel_order_no}_{idx}")
+                        it_qty = col_i2.number_input(f"数量 #{idx+1}", min_value=1, value=int(d_row["受注残数"]), key=f"eq_{sel_order_no}_{idx}")
+                        it_memo = col_i3.text_input(f"備考 #{idx+1}", value=d_row["備考"], key=f"em_{sel_order_no}_{idx}")
+                        edited_items.append({"code": it_code, "qty": it_qty, "memo": it_memo})
+
+                    btn_c1, btn_c2 = st.columns(2)
+                    update_sub = btn_c1.form_submit_button("💾 伝票の内容を更新する", type="primary")
+                    delete_sub = btn_c2.form_submit_button("🚨 この伝票を削除する")
+
+                    if update_sub:
+                        df_all_man = pd.read_csv(MANUAL_YAYOI_CSV)
+                        # 一旦該当番号を削除して新しく入れ直す
+                        df_filtered = df_all_man[df_all_man["受注番号"].astype(str) != str(sel_order_no)]
+                        
+                        up_rows = []
+                        for ei in edited_items:
+                            up_rows.append({
+                                "受注番号": sel_order_no,
+                                "得意先名": str(new_comp).strip(),
+                                "商品コード": str(ei["code"]).strip(),
+                                "受注残数": int(ei["qty"]),
+                                "数量": int(ei["qty"]),
+                                "受注日": new_date.strftime("%Y-%m-%d"),
+                                "納入期日": new_limit.strftime("%Y-%m-%d"),
+                                "受注日_dt": pd.to_datetime(new_date),
+                                "納入期日_dt": pd.to_datetime(new_limit),
+                                "備考": str(ei["memo"]).strip(),
+                                "倉庫名": "WEB入力",
+                                "商品名/摘要": "",
+                                "担当者名": str(new_staff).strip()
+                            })
+                        df_updated = pd.concat([df_filtered, pd.DataFrame(up_rows)], ignore_index=True)
+                        df_updated.to_csv(MANUAL_YAYOI_CSV, index=False, encoding="utf-8-sig")
+                        st.cache_data.clear()
+                        st.success(f"✅ 受注番号『{sel_order_no}』を更新しました！")
+                        st.rerun()
+
+                    if delete_sub:
+                        df_all_man = pd.read_csv(MANUAL_YAYOI_CSV)
+                        df_filtered = df_all_man[df_all_man["受注番号"].astype(str) != str(sel_order_no)]
+                        df_filtered.to_csv(MANUAL_YAYOI_CSV, index=False, encoding="utf-8-sig")
+                        st.cache_data.clear()
+                        st.success(f"✅ 受注番号『{sel_order_no}』を削除しました！")
+                        st.rerun()
+
+                st.markdown("</div>", unsafe_allow_html=True)
         else:
             st.info("現在、登録された伝票はありません。")
     else:
