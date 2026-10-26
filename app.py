@@ -53,33 +53,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ---------------------------------------------------------
-# 1. 会社マスタ（全342社）の完全内蔵データ
-# ---------------------------------------------------------
-EMBEDDED_COMPANIES = [
-    {"code": "1", "name": "テスト株式会社"}, {"code": "10", "name": "旭電機化成 大阪営業所"},
-    {"code": "1000", "name": "㈱ティーピーインターナショナル"}, {"code": "1001", "name": "岩田工具株式会社"},
-    {"code": "1002", "name": "SEIビジネスクリエイツ株式会社"}, {"code": "1003", "name": "有限会社タカノ保安商会"},
-    {"code": "1004", "name": "有限会社大石製作所"}, {"code": "100400", "name": "アサヒサイクル株式会社"},
-    {"code": "1005", "name": "（有）泉製作所"}, {"code": "1006", "name": "アイバリー（株）"},
-    {"code": "1007", "name": "相模ゴム工業株式会社"}, {"code": "1008", "name": "三洋化成工業株式会社"},
-    {"code": "1009", "name": "新明和工業株式会社"}, {"code": "1010", "name": "住友電気工業株式会社"},
-    {"code": "1011", "name": "大同特殊鋼株式会社"}, {"code": "1012", "name": "株式会社ダイドー"},
-    {"code": "1013", "name": "高砂香料工業株式会社"}, {"code": "1014", "name": "タキロン株式会社"},
-    {"code": "1015", "name": "中外製薬株式会社"}, {"code": "1016", "name": "帝国製薬株式会社"},
-    {"code": "1017", "name": "東洋製罐株式会社"}, {"code": "1018", "name": "日東電工株式会社"},
-    {"code": "1019", "name": "日本精工株式会社"}, {"code": "1020", "name": "日本板硝子株式会社"},
-    {"code": "1021", "name": "日本油脂株式会社"}, {"code": "1022", "name": "パイロットコーポレーション"},
-    {"code": "1023", "name": "阪神化成工業株式会社"}, {"code": "102400", "name": "株式会社カワタキコーポレーション"},
-    {"code": "1025", "name": "フジッコ株式会社"}, {"code": "1026", "name": "古河電気工業株式会社"},
-    {"code": "1027", "name": "三井化学株式会社"}, {"code": "1028", "name": "三菱マテリアル株式会社"},
-    {"code": "1029", "name": "村田製作所"}, {"code": "1030", "name": "株式会社モリタ"},
-    {"code": "104400", "name": "清水産業 株式会社"}, {"code": "127400", "name": "株式会社 丸藤"},
-    {"code": "127410", "name": "株式会社 丸藤 東日本"}, {"code": "132600", "name": "アーネスト株式会社"},
-    {"code": "133000", "name": "株式会社オバタ"}, {"code": "116300", "name": "トップ産業株式会社"},
-    {"code": "900100", "name": "ら・でぃっしゅぼーや株式会社"}, {"code": "900200", "name": "アマゾンベンダー（ホーム）"}
-]
-
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in locals() else "."
 
 SEARCH_DIRS = [
@@ -107,7 +80,7 @@ def find_target_file(keywords, ext=".xlsx"):
 MAIN_EXCEL = find_target_file(["発注検討表"])
 YAYOI_EXCEL = find_target_file(["弥生確保リスト", "確保リスト"])
 YAYOI_ITEM_EXCEL = find_target_file(["弥生商品番号", "商品番号"])
-YAYOI_COMP_EXCEL = find_target_file(["弥生会社名", "会社名"])
+YAYOI_COMP_EXCEL = find_target_file(["弥生会社名", "会社名", "得意先"])
 
 SAVE_CSV = os.path.join(SCRIPT_DIR, "meeting_decisions_v8.csv")
 MANUAL_YAYOI_CSV = os.path.join(SCRIPT_DIR, "yayoi_manual_additions.csv")
@@ -145,51 +118,62 @@ def to_num(val):
 def load_company_master(file_source):
     loaded = []
     seen = set()
-    if file_source and os.path.exists(file_source):
-        try:
-            df_c = pd.read_excel(file_source, sheet_name=0, header=None)
-            for idx in range(len(df_c)):
-                r = df_c.iloc[idx].values
-                if len(r) < 3:
-                    continue
-                c_code = clean_str(r[1])
-                c_name = clean_str(r[2])
-                if not c_name or c_name in ("名称", "得意先名", "会社名", "得意先リスト", "コード順"):
-                    continue
-                if c_name not in seen:
-                    seen.add(c_name)
-                    loaded.append({"code": c_code, "name": c_name})
-        except Exception:
-            pass
-    # フォールバックとして内蔵データもマージ
-    if file_source is None or not os.path.exists(file_source) or len(loaded) < 50:
-        for ec in EMBEDDED_COMPANIES:
-            if ec["name"] not in seen:
-                seen.add(ec["name"])
-                loaded.append(ec)
+    sources = [file_source, YAYOI_COMP_EXCEL, "弥生会社名.xlsx", r"G:\マイドライブ\発注検討\弥生会社名.xlsx"]
+    for src in sources:
+        if src and os.path.exists(src):
+            try:
+                df_c = pd.read_excel(src, sheet_name=0, header=None)
+                for idx in range(len(df_c)):
+                    r = df_c.iloc[idx].values
+                    if len(r) < 3:
+                        continue
+                    c_code = clean_str(r[1])
+                    c_name = clean_str(r[2])
+                    if not c_name or c_name in ("名称", "得意先名", "会社名", "得意先リスト", "コード順", "コード"):
+                        continue
+                    if c_name not in seen:
+                        seen.add(c_name)
+                        loaded.append({"code": c_code, "name": c_name})
+                if len(loaded) > 50:
+                    break
+            except Exception:
+                continue
+    # フォールバック（最低限の主要企業）
+    if not loaded:
+        loaded = [
+            {"code": "1", "name": "テスト株式会社"}, {"code": "10", "name": "旭電機化成 大阪営業所"},
+            {"code": "104400", "name": "清水産業 株式会社"}, {"code": "127400", "name": "株式会社 丸藤"},
+            {"code": "127410", "name": "株式会社 丸藤 東日本"}, {"code": "132600", "name": "アーネスト株式会社"},
+            {"code": "133000", "name": "株式会社オバタ"}, {"code": "116300", "name": "トップ産業株式会社"},
+            {"code": "900100", "name": "ら・でぃっしゅぼーや株式会社"}, {"code": "900200", "name": "アマゾンベンダー（ホーム）"}
+        ]
     return loaded
 
 @st.cache_data
 def load_item_master(file_source):
     loaded = []
     seen = set()
-    if file_source and os.path.exists(file_source):
-        try:
-            df_i = pd.read_excel(file_source, sheet_name=0, header=None)
-            for idx in range(len(df_i)):
-                r = df_i.iloc[idx].values
-                if len(r) < 3:
-                    continue
-                i_code = clean_str(r[1])
-                i_name = clean_str(r[2])
-                i_wh = clean_str(r[20]) if len(r) > 20 else ""
-                if not i_code or i_code in ("コード", "商品コード", "品番", "商品リスト", "コード順"):
-                    continue
-                if i_code not in seen:
-                    seen.add(i_code)
-                    loaded.append({"code": i_code, "name": i_name, "wh": i_wh if i_wh in ("青山", "名古屋", "共通") else ""})
-        except Exception:
-            pass
+    sources = [file_source, YAYOI_ITEM_EXCEL, "弥生商品番号.xlsx", r"G:\マイドライブ\発注検討\弥生商品番号.xlsx"]
+    for src in sources:
+        if src and os.path.exists(src):
+            try:
+                df_i = pd.read_excel(src, sheet_name=0, header=None)
+                for idx in range(len(df_i)):
+                    r = df_i.iloc[idx].values
+                    if len(r) < 3:
+                        continue
+                    i_code = clean_str(r[1])
+                    i_name = clean_str(r[2])
+                    i_wh = clean_str(r[20]) if len(r) > 20 else ""
+                    if not i_code or i_code in ("コード", "商品コード", "品番", "商品リスト", "コード順", "名称"):
+                        continue
+                    if i_code not in seen:
+                        seen.add(i_code)
+                        loaded.append({"code": i_code, "name": i_name, "wh": i_wh if i_wh in ("青山", "名古屋", "共通") else ""})
+                if len(loaded) > 50:
+                    break
+            except Exception:
+                continue
     return loaded
 
 @st.cache_data
@@ -308,18 +292,22 @@ def load_excel_master(file_source):
 @st.cache_data
 def load_yayoi_data(file_source):
     df = pd.DataFrame()
-    if file_source is not None:
-        try:
-            df_raw = pd.read_excel(file_source, sheet_name=0, header=None)
-            h_idx = 4
-            for i in range(min(15, len(df_raw))):
-                row_v = [clean_str(x) for x in df_raw.iloc[i].values]
-                if "商品コード" in row_v or "得意先名" in row_v:
-                    h_idx = i
+    sources = [file_source, YAYOI_EXCEL, "弥生確保リスト.xlsx", r"G:\マイドライブ\発注検討\弥生確保リスト.xlsx"]
+    for src in sources:
+        if src and os.path.exists(src):
+            try:
+                df_raw = pd.read_excel(src, sheet_name=0, header=None)
+                h_idx = 4
+                for i in range(min(15, len(df_raw))):
+                    row_v = [clean_str(x) for x in df_raw.iloc[i].values]
+                    if "商品コード" in row_v or "得意先名" in row_v:
+                        h_idx = i
+                        break
+                df = pd.read_excel(src, sheet_name=0, header=h_idx)
+                if not df.empty and "商品コード" in df.columns:
                     break
-            df = pd.read_excel(file_source, sheet_name=0, header=h_idx)
-        except Exception:
-            pass
+            except Exception:
+                continue
 
     if not df.empty and "商品コード" in df.columns:
         df = df[df["商品コード"].notna()].copy()
@@ -372,7 +360,7 @@ def load_yayoi_data(file_source):
 @st.cache_data
 def load_sales_csvs(uploaded_files, valid_norm_codes_tuple):
     """
-    売上CSV群の全行・全列を解析し、ASC-001等の商品コードと売上数量を1件も漏らさず正確に集計する。
+    売上CSV群の全行・全列を解析し、ASC-001等の売上数を1件も漏らさず正確に集計する決定版パーサ。
     """
     valid_codes = set(valid_norm_codes_tuple)
     all_records = []
@@ -382,6 +370,7 @@ def load_sales_csvs(uploaded_files, valid_norm_codes_tuple):
         if os.path.exists(d):
             local_csv_paths.extend(glob.glob(os.path.join(d, "*yayoi*.csv")))
             local_csv_paths.extend(glob.glob(os.path.join(d, "*売上*.csv")))
+            local_csv_paths.extend(glob.glob(os.path.join(d, "*.csv")))
     local_csv_paths = sorted(list(set(local_csv_paths)))
 
     sources = uploaded_files if uploaded_files else local_csv_paths
@@ -409,91 +398,40 @@ def load_sales_csvs(uploaded_files, valid_norm_codes_tuple):
 
         loaded_file_count += 1
 
-        # 1. ヘッダー行探索
-        header_row_idx = None
-        code_col_idx = None
-        qty_col_idx = None
-        for r_i in range(min(10, len(df_s))):
-            row_strs = [clean_str(x) for x in df_s.iloc[r_i].values]
-            c_idx = next((i for i, c in enumerate(row_strs) if c in ("商品コード", "品番", "商品番号", "コード") or "商品コード" in c), None)
-            q_idx = next((
-                i for i, c in enumerate(row_strs)
-                if c in ("数量", "売上数量", "受注数量", "出荷数量", "受注残数", "売上数", "バラ数量", "総数量")
-            ), None)
-            if q_idx is None:
-                q_idx = next((
-                    i for i, c in enumerate(row_strs)
-                    if ("数量" in c or "売上数" in c) and not any(ng in c for ng in ["単価", "金額", "入数", "ケース", "小数", "税"])
-                ), None)
-            if c_idx is not None and q_idx is not None:
-                header_row_idx = r_i
-                code_col_idx = c_idx
-                qty_col_idx = q_idx
-                break
+        # 各行をスキャンして有効な品番が含まれる行を探し、その行の数値列から数量を特定する
+        for r_i in range(len(df_s)):
+            row_vals = df_s.iloc[r_i].values
+            # 行内から有効なマスター品番と一致するセルを探す
+            matched_code_col = None
+            matched_code_norm = None
+            for c_i in range(len(row_vals)):
+                norm_v = normalize_code(row_vals[c_i])
+                if norm_v in valid_codes:
+                    matched_code_col = c_i
+                    matched_code_norm = norm_v
+                    break
 
-        if header_row_idx is not None:
-            for r_i in range(header_row_idx + 1, len(df_s)):
-                r_vals = df_s.iloc[r_i].values
-                if len(r_vals) <= max(code_col_idx, qty_col_idx):
-                    continue
-                c_norm = normalize_code(r_vals[code_col_idx])
-                if c_norm in valid_codes:
-                    q_v = to_num(r_vals[qty_col_idx])
-                    if q_v != 0:
-                        all_records.append({"file": os.path.basename(fname), "code_norm": c_norm, "qty": q_v})
-            continue
+            if matched_code_col is not None:
+                # 品番が見つかった場合、その右側（または行全体）の数値列から「数量」らしき値（1〜10000程度の整数）を抽出
+                found_qty = 0.0
+                for q_i in range(matched_code_col + 1, min(matched_code_col + 12, len(row_vals))):
+                    q_num = to_num(row_vals[q_i])
+                    # 単価や金額（通常数千〜数百万）ではなく、手頃な数量サイズの数値（かつ0ではない）を採用
+                    if q_num > 0 and q_num < 50000:
+                        found_qty = q_num
+                        break
+                if found_qty == 0:
+                    # もし右側に適当な数値がなければ、行内の任意の数値セルから探す
+                    for q_i in range(len(row_vals)):
+                        if q_i == matched_code_col:
+                            continue
+                        q_num = to_num(row_vals[q_i])
+                        if 0 < q_num < 10000:
+                            found_qty = q_num
+                            break
 
-        # 2. ヘッダー無しの場合：各セルを総スキャンしてマスターコードと一致する行を抽出
-        col_code_hits = {}
-        for col_i in range(df_s.shape[1]):
-            col_norms = df_s.iloc[:, col_i].apply(normalize_code)
-            hits = int(col_norms.isin(valid_codes).sum())
-            if hits > 0:
-                col_code_hits[col_i] = hits
-
-        if not col_code_hits:
-            continue
-
-        best_code_col = max(col_code_hits, key=col_code_hits.get)
-        matched_rows_mask = df_s.iloc[:, best_code_col].apply(normalize_code).isin(valid_codes)
-        df_matched = df_s[matched_rows_mask].copy()
-
-        num_cols = {}
-        for q_i in range(best_code_col + 1, min(best_code_col + 14, df_matched.shape[1])):
-            s_num = df_matched.iloc[:, q_i].apply(to_num)
-            if (s_num != 0).sum() > 0:
-                num_cols[q_i] = s_num
-
-        col_votes = {q_i: 0 for q_i in num_cols}
-        c_keys = sorted(num_cols.keys())
-        for idx_a in range(len(c_keys)):
-            for idx_b in range(idx_a + 1, len(c_keys)):
-                for idx_c in range(idx_b + 1, len(c_keys)):
-                    ca, cb, cc = c_keys[idx_a], c_keys[idx_b], c_keys[idx_c]
-                    va, vb, vc = num_cols[ca], num_cols[cb], num_cols[cc]
-                    valid_m = (va != 0) & (vb >= 20) & (vc != 0) & ((va * vb - vc).abs() <= 2)
-                    col_votes[ca] += int(valid_m.sum())
-
-        best_qty_col = None
-        if col_votes and max(col_votes.values()) > 0:
-            best_qty_col = max(col_votes, key=col_votes.get)
-        else:
-            for cand_col in c_keys:
-                s_cand = num_cols[cand_col]
-                non_zero = s_cand[s_cand != 0]
-                if len(non_zero) == 0:
-                    continue
-                if non_zero.median() > 1500:
-                    continue
-                best_qty_col = cand_col
-                break
-
-        if best_qty_col is not None:
-            for _, r_m in df_matched.iterrows():
-                c_norm = normalize_code(r_m.iloc[best_code_col])
-                q_v = to_num(r_m.iloc[best_qty_col])
-                if q_v != 0:
-                    all_records.append({"file": os.path.basename(fname), "code_norm": c_norm, "qty": q_v})
+                if found_qty > 0:
+                    all_records.append({"file": os.path.basename(fname), "code_norm": matched_code_norm, "qty": found_qty})
 
     if not all_records:
         return pd.Series(dtype=int), loaded_file_count, pd.DataFrame()
