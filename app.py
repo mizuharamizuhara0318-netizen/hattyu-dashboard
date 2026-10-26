@@ -46,6 +46,7 @@ if not os.path.exists(MAIN_EXCEL):
 
 YAYOI_EXCEL = os.path.join(BASE_DIR, "弥生確保リスト.xlsx")
 SAVE_CSV = os.path.join(BASE_DIR, "meeting_decisions_v8.csv")
+MANUAL_YAYOI_CSV = os.path.join(BASE_DIR, "yayoi_manual_additions.csv")
 
 def safe_get_rows(ws):
     rows = []
@@ -100,8 +101,58 @@ def load_yayoi_data(file_source):
         df["担当者名"] = df["担当者名"].apply(clean_str)
     else:
         df["担当者名"] = ""
+    
+    # 手動追加された弥生データを結合
+    if os.path.exists(MANUAL_YAYOI_CSV):
+        try:
+            df_man = pd.read_csv(MANUAL_YAYOI_CSV).fillna("")
+            if not df_man.empty:
+                df = pd.concat([df, df_man], ignore_index=True)
+        except Exception:
+            pass
+
     df = df.sort_values(by=["受注日_dt", "納入期日_dt"], ascending=[False, False], na_position="last")
     return df
+
+@st.cache_data
+def load_sales_csvs(uploaded_files):
+    """今月の売上CSV群を合算して、品番ごとの今月売れ数を計算する"""
+    if not uploaded_files:
+        return pd.Series(dtype=int)
+    
+    all_dfs = []
+    current_year_month = datetime.date.today().strftime("%Y-%m")
+    
+    for f in uploaded_files:
+        try:
+            df_s = pd.read_csv(f, encoding="utf-8-sig")
+        except Exception:
+            try:
+                df_s = pd.read_csv(f, encoding="shift_jis")
+            except Exception:
+                continue
+        
+        # 売上CSVの列構造に合わせたパース（商品コード、数量、日付などの列を想定）
+        code_col = next((c for c in df_s.columns if "商品コード" in c or "品番" in c), None)
+        qty_col = next((c for c in df_s.columns if "数量" in c or "数" in c), None)
+        date_col = next((c for c in df_s.columns if "日" in c or "日付" in c), None)
+        
+        if code_col and qty_col:
+            temp = pd.DataFrame()
+            temp["商品コード"] = df_s[code_col].astype(str).str.strip()
+            temp["数量"] = pd.to_numeric(df_s[qty_col], errors="coerce").fillna(0)
+            if date_col:
+                temp["日付"] = pd.to_datetime(df_s[date_col], errors="coerce").dt.strftime("%Y-%m")
+                # 今月分のデータのみ抽出
+                temp = temp[temp["日付"] == current_year_month]
+            all_dfs.append(temp)
+            
+    if not all_dfs:
+        return pd.Series(dtype=int)
+        
+    combined = pd.concat(all_dfs, ignore_index=True)
+    sales_summary = combined.groupby("商品コード")["数量"].sum().astype(int)
+    return sales_summary
 
 @st.cache_data
 def load_excel_master(file_source):
@@ -205,8 +256,8 @@ head_col1, head_col2 = st.columns([3, 2])
 with head_col1:
     st.markdown('<div class="app-header">📊 発注検討表（直接編集 ＆ 弥生確保連動システム）</div>', unsafe_allow_html=True)
 with head_col2:
-    with st.expander("📂 最新データの更新・ドライブ再読み込み"):
-        if st.button("🔄 ドライブ / ローカルから最新データを再読み込み"):
+    with st.expander("📂 最新データ更新 ＆ 売れ数CSV読込"):
+        if st.button("🔄 最新データを再読み込み"):
             st.cache_data.clear()
             if "master_df" in st.session_state:
                 del st.session_state.master_df
@@ -215,8 +266,9 @@ with head_col2:
                 st.rerent()
             else:
                 st.experimental_rerun()
-        up_main = st.file_uploader("① 発注検討表.xlsx を手動アップロード", type=["xlsx"], key="up_m")
-        up_yayoi = st.file_uploader("② 弥生確保リスト.xlsx を手動アップロード", type=["xlsx"], key="up_y")
+        up_main = st.file_uploader("① 発注検討表.xlsx", type=["xlsx"], key="up_m")
+        up_yayoi = st.file_uploader("② 弥生確保リスト.xlsx", type=["xlsx"], key="up_y")
+        up_sales = st.file_uploader("③ 今月の売上CSV（複数選択可）", type=["csv"], accept_multiple_files=True, key="up_s")
 
 main_src = up_main if up_main is not None else (MAIN_EXCEL if os.path.exists(MAIN_EXCEL) else None)
 yayoi_src = up_yayoi if up_yayoi is not None else (YAYOI_EXCEL if os.path.exists(YAYOI_EXCEL) else None)
@@ -227,6 +279,13 @@ if main_src is None:
 
 df_yayoi = load_yayoi_data(yayoi_src) if yayoi_src is not None else pd.DataFrame()
 df_main, df_hist, prev_col_title = load_excel_master(main_src)
+
+# 売上CSVがアップロードされている場合、今月売れ数を計算してマージ
+sales_series = load_sales_csvs(up_sales)
+if not sales_series.empty:
+    df_main["今月売れ数"] = df_main["品番"].map(sales_series).fillna(0).astype(int)
+else:
+    df_main["今月売れ数"] = 0
 
 if df_main.empty:
     st.error("⚠️ 発注検討表のデータ読み込みに失敗しました。")
@@ -279,10 +338,10 @@ tab1, tab2, tab3 = st.tabs([
 ])
 
 with tab1:
-    f_col1, f_col2, f_col3 = st.columns([2.2, 1.5, 3])
+    f_col1, f_col2, f_col3 = st.columns([2.5, 1.5, 3])
     filter_mode = f_col1.selectbox(
         "表示絞り込み",
-        ["すべて表示（Excelと同じ並び）", "🚨 要発注（発注検討フラグがマイナスのみ）", "確保数のズレがある商品", "入荷予定がある商品", "弥生確保がある商品"],
+        ["すべて表示（Excelと同じ並び）", "🚨 要発注（発注検討フラグがマイナスのみ）", "🔥 【ヒット商品】在庫があるのに今月売れている", "確保数のズレがある商品", "入荷予定がある商品", "弥生確保がある商品"],
         index=0
     )
     center_opt = ["すべて"] + sorted([x for x in m_df["商品センター"].unique() if x])
@@ -292,6 +351,9 @@ with tab1:
     v_df = m_df.copy()
     if filter_mode == "🚨 要発注（発注検討フラグがマイナスのみ）":
         v_df = v_df[(v_df["発注検討フラグ"] < 0) & (~v_df["NA行"])]
+    elif filter_mode == "🔥 【ヒット商品】在庫があるのに今月売れている":
+        # フリー在庫が5個以上あるのに、今月すでに5個以上売れている商品（ヒット商品）
+        v_df = v_df[(v_df["入荷後のフリー在庫"] >= 5) & (v_df["今月売れ数"] >= 5) & (~v_df["NA行"])]
     elif filter_mode == "確保数のズレがある商品":
         v_df = v_df[v_df["確保数のズレ"] != 0]
     elif filter_mode == "入荷予定がある商品":
@@ -407,6 +469,7 @@ with tab1:
         .bg-pink-rate {{ background-color: #fbcfe8 !important; color: #be123c; font-weight: bold; }}
         .bg-yellow-ro {{ background-color: #fef08a !important; color: #1e293b; }}
         .bg-yellow-edit {{ background-color: #ffff00 !important; }}
+        .bg-sales-hit {{ background-color: #fed7aa !important; font-weight: bold; color: #c2410c; }}
         
         tr.na-row td {{ background-color: #4b5563 !important; color: #f3f4f6 !important; }}
         tr.na-row td .click-link {{ color: #93c5fd !important; }}
@@ -534,7 +597,7 @@ with tab1:
 
     <div class="toolbar">
         <div class="toolbar-info">表示件数: <span id="row-count">0</span> 件</div>
-        <div class="toolbar-hint">💡 表の「品番」または「在庫確保(弥生)の青数字」をクリックすると、受注日最新順で内訳ポップアップが開きます！</div>
+        <div class="toolbar-hint">💡 品番・在庫確保数クリックでポップアップ表示 ｜ 「今月売れ数」列でヒット商品を自動検出！</div>
         <div class="btn-group">
             <button class="btn btn-download" onclick="exportEditedCSV()">📥 編集内容を反映したCSVをダウンロード</button>
         </div>
@@ -559,6 +622,7 @@ with tab1:
                     <th class="w-num">確保数の<br>ズレ</th>
                     <th class="w-num">入荷後の<br>フリー在庫</th>
                     <th class="w-num">発注検討<br>フラグ<br><span class="red-txt">マイナスの<br>場合発注検討</span></th>
+                    <th class="w-num">今月売れ数<br><span style="color:#c2410c; font-weight:bold;">🔥ヒット検出</span></th>
                     <th class="w-num">在庫回転<br>率</th>
                     <th class="w-num">リンベル<br>確保数</th>
                     <th class="w-prev-dec">{prev_title_html}</th>
@@ -648,6 +712,8 @@ with tab1:
                 const flagCls = (Number(r["発注検討フラグ"]) < 0 && !r["NA行"]) ? "bg-flag-neg" : "bg-cyan";
                 const rateVal = Number(r["在庫回転率"]);
                 const rateCls = (!r["NA行"] && rateVal <= 5) ? "bg-pink-rate" : "bg-green";
+                const salesVal = Number(r["今月売れ数"] || 0);
+                const salesCls = (salesVal >= 5 && Number(r["入荷後のフリー在庫"]) >= 5) ? "bg-sales-hit" : "";
                 
                 html += `<tr class="${{rowCls}}">
                     <td class="w-no sticky-col-1">${{r["No"]}}</td>
@@ -673,6 +739,7 @@ with tab1:
                     <td class="w-num bg-cyan">${{fmtNum(r["確保数のズレ"])}}</td>
                     <td class="w-num bg-cyan">${{fmtNum(r["入荷後のフリー在庫"])}}</td>
                     <td class="w-num ${{flagCls}}">${{r["NA行"] ? "#N/A" : fmtNum(r["発注検討フラグ"])}}</td>
+                    <td class="w-num ${{salesCls}}" title="今月売れ数">${{salesVal > 0 ? "🔥 " + fmtNum(salesVal) : "0"}}</td>
                     <td class="w-num ${{rateCls}}">${{r["NA行"] ? "#N/A" : fmtNum(r["在庫回転率"]) + "%"}}</td>
                     <td class="w-num">${{fmtNum(r["リンベル確保数"])}}</td>
                     <td class="w-prev-dec bg-yellow-ro" title="${{r["前回決定事項"] || ""}}">${{r["前回決定事項"] || ""}}</td>
@@ -713,8 +780,7 @@ with tab1:
                 <div class="summary-item">1課発注点: <span>${{fmtNum(r["1課発注点"])}}</span></div>
                 <div class="summary-item">ロジ在庫数: <span>${{fmtNum(r["在庫数_ロジザード"])}}</span></div>
                 <div class="summary-item">ロジ確保数: <span>${{fmtNum(r["確保数_ロジザード"])}}</span></div>
-                <div class="summary-item">弥生確保: <span>${{fmtNum(r["在庫確保_弥生"])}}</span></div>
-                <div class="summary-item">丸藤確保: <span>${{fmtNum(r["在庫確保_丸藤"])}}</span></div>
+                <div class="summary-item">今月売れ数: <span style="color:#c2410c;">${{fmtNum(r["今月売れ数"])}}</span></div>
                 <div class="summary-item">フリー在庫: <span>${{fmtNum(r["入荷後のフリー在庫"])}}</span></div>
                 <div class="summary-item">発注検討フラグ: <span style="color:#e11d48;">${{fmtNum(r["発注検討フラグ"])}}</span></div>
             `;
@@ -805,7 +871,7 @@ with tab1:
                 "No", "商品センター", "品番", "商品区分", "1課発注点", "2課発注点",
                 "在庫数_ロジザード", "入荷予定数_ロジザード", "入荷予定日_ロジザード",
                 "確保数_ロジザード", "在庫確保_弥生", "在庫確保_丸藤", "確保数のズレ",
-                "入荷後のフリー在庫", "発注検討フラグ", "在庫回転率", "リンベル確保数",
+                "入荷後のフリー在庫", "発注検討フラグ", "今月売れ数", "在庫回転率", "リンベル確保数",
                 "前回決定事項", "決定事項", "発注日"
             ];
             let csv = "\\uFEFF" + cols.join(",") + "\\n";
@@ -834,9 +900,50 @@ with tab1:
     components.html(html_code, height=675, scrolling=False)
 
 with tab2:
-    st.subheader("🏢 会社（得意先）別 確保・注文検索 ＆ 月別納期スケジュール")
+    st.subheader("🏢 会社（得意先）別 確保・注文検索 ＆ 新規確保データの追加")
+    
+    # 新規確保データの直接追加フォーム
+    with st.expander("➕ 【弥生を使わずここから追加】新規の確保データを登録する"):
+        with st.form("add_yayoi_form"):
+            f_c1, f_c2, f_c3 = st.columns(3)
+            add_comp = f_c1.text_input("得意先名（会社名） *")
+            add_code = f_c2.text_input("品番（商品コード） *")
+            add_qty = f_c3.number_input("受注残数（数量） *", min_value=1, value=1)
+
+            f_c4, f_c5, f_c6 = st.columns(3)
+            add_date = f_c4.date_input("受注日", value=datetime.date.today())
+            add_limit = f_c5.date_input("納入期日", value=datetime.date.today())
+            add_memo = f_c6.text_input("備考 / 倉庫名")
+
+            submitted = st.form_submit_button("💾 確保データを追加する")
+            if submitted:
+                if not add_comp or not add_code:
+                    st.error("⚠️ 「得意先名」と「品番」は必須です。")
+                else:
+                    new_row = {
+                        "得意先名": add_comp.strip(),
+                        "商品コード": add_code.strip(),
+                        "受注残数": int(add_qty),
+                        "数量": int(add_qty),
+                        "受注日": add_date.strftime("%Y-%m-%d"),
+                        "納入期日": add_limit.strftime("%Y-%m-%d"),
+                        "受注日_dt": pd.to_datetime(add_date),
+                        "納入期日_dt": pd.to_datetime(add_limit),
+                        "備考": add_memo.strip(),
+                        "倉庫名": "WEB入力",
+                        "担当者名": "システム追加"
+                    }
+                    df_new = pd.DataFrame([new_row])
+                    if os.path.exists(MANUAL_YAYOI_CSV):
+                        df_existing = pd.read_csv(MANUAL_YAYOI_CSV)
+                        df_combined_man = pd.concat([df_existing, df_new], ignore_index=True)
+                    else:
+                        df_combined_man = df_new
+                    df_combined_man.to_csv(MANUAL_YAYOI_CSV, index=False, encoding="utf-8-sig")
+                    st.success(f"✅ 『{add_comp}』様の確保データ（品番: {add_code} / 数量: {add_qty}）を追加しました！再読み込みボタンを押して反映してください。")
+
     if df_yayoi.empty:
-        st.warning("『弥生確保リスト.xlsx』が見つかりません。")
+        st.warning("『弥生確保リスト.xlsx』、または手動追加データがありません。")
     else:
         comp_totals = df_yayoi.groupby("得意先名")["受注残数"].sum().sort_values(ascending=False)
         comp_opts = ["すべての会社を表示"] + [f"{c} （確保合計: {v:,} 個）" for c, v in comp_totals.items()]
