@@ -163,13 +163,22 @@ def load_item_master(file_source):
 def load_excel_master(file_source):
     if file_source is None:
         return pd.DataFrame(), pd.DataFrame(), "前回決定事項"
+    target_df = None
     try:
         all_sheets = pd.read_excel(file_source, sheet_name=None, header=None)
+        target_df = list(all_sheets.values())[0]
     except Exception as e:
-        st.error(f"発注検討表の読み込みエラー: {e}")
-        return pd.DataFrame(), pd.DataFrame(), "前回決定事項"
-
-    target_df = list(all_sheets.values())[0]
+        # openpyxlのフィルタXMLエラー等を強制回避して読み込む
+        try:
+            wb = openpyxl.load_workbook(file_source, data_only=True, keep_vba=False)
+            ws = wb[wb.sheetnames[0]]
+            data = []
+            for row in ws.iter_rows(values_only=True):
+                data.append(list(row))
+            target_df = pd.DataFrame(data)
+        except Exception as ex:
+            st.error(f"発注検討表の読み込みエラー: {ex}")
+            return pd.DataFrame(), pd.DataFrame(), "前回決定事項"
 
     header_idx = 0
     for idx in range(min(15, len(target_df))):
@@ -276,30 +285,7 @@ def load_excel_master(file_source):
         })
 
     df_main = pd.DataFrame(items)
-
-    hist_list = []
-    for s_name, df_s in all_sheets.items():
-        s_str = str(s_name).strip()
-        if s_str.isdigit() and len(s_str) == 5 and not df_s.empty:
-            h_row_vals = [clean_str(x) for x in df_s.iloc[0].values]
-            h_col_idx = next((i for i, c in enumerate(h_row_vals) if c == "品番"), 2)
-            k_cols = [i for i, c in enumerate(h_row_vals) if c and "決定事項" in c and "前回" not in c]
-            s_clean = s_str.lstrip("0")
-            rest = s_clean[1:] if s_clean.startswith("8") else s_clean
-            dt_str = f"2026-{rest[:2]}-{rest[2:]}" if len(rest) == 4 else (f"2026-0{rest[0]}-{rest[1:]}" if len(rest) == 3 else s_str)
-            for _, r_d in df_s.iloc[1:].iterrows():
-                r_vals = r_d.values
-                if len(r_vals) <= h_col_idx:
-                    continue
-                c_val = clean_str(r_vals[h_col_idx])
-                if not c_val:
-                    continue
-                for kc in k_cols:
-                    if kc < len(r_vals) and clean_str(r_vals[kc]) not in ("", "0"):
-                        hist_list.append({"会議日": dt_str, "シート": s_str, "品番": c_val, "決定事項": clean_str(r_vals[kc])})
-
-    df_hist = pd.DataFrame(hist_list).drop_duplicates(subset=["会議日", "品番", "決定事項"]) if hist_list else pd.DataFrame(columns=["会議日", "シート", "品番", "決定事項"])
-    return df_main, df_hist, prev_col_title
+    return df_main, pd.DataFrame(columns=["会議日", "シート", "品番", "決定事項"]), prev_col_title
 
 @st.cache_data
 def load_yayoi_data(file_source):
@@ -497,8 +483,6 @@ if not df_yayoi.empty:
 
     df_main["在庫確保_弥生"] = df_main["品番_正規化"].map(yayoi_real_totals).fillna(0).astype(int)
     df_main["在庫確保_丸藤"] = df_main["品番_正規化"].map(marufuji_real_totals).fillna(0).astype(int)
-
-    # 確保数のズレ = 確保数ロジザード - 在庫確保弥生 - 在庫確保丸藤
     df_main["確保数のズレ"] = df_main["確保数_ロジザード"] - df_main["在庫確保_弥生"] - df_main["在庫確保_丸藤"]
 
     for code_n, grp in df_yayoi.groupby("品番_正規化", sort=False):
@@ -538,23 +522,6 @@ if not sales_series.empty:
 else:
     df_main["今月売れ数"] = 0
 
-hist_dict = {}
-if not df_hist.empty:
-    for code, grp in df_hist.sort_values("会議日", ascending=False).groupby("品番"):
-        hist_dict[code] = grp[["会議日", "決定事項", "シート"]].to_dict(orient="records")
-
-if os.path.exists(SAVE_CSV):
-    try:
-        df_saved = pd.read_csv(SAVE_CSV).fillna("")
-        for _, s_row in df_saved.iterrows():
-            c = clean_str(s_row["品番"])
-            if c in df_main["品番"].values:
-                df_main.loc[df_main["品番"] == c, "入荷予定日_ロジザード"] = clean_str(s_row.get("入荷予定日_ロジザード", ""))
-                df_main.loc[df_main["品番"] == c, "決定事項"] = clean_str(s_row.get("決定事項", ""))
-                df_main.loc[df_main["品番"] == c, "発注日"] = clean_str(s_row.get("発注日", ""))
-    except Exception:
-        pass
-
 m_df = df_main.copy()
 
 total_sales_qty = int(m_df["今月売れ数"].sum())
@@ -565,9 +532,6 @@ st.caption(
     f"🔥 今月売れ数合計: **{total_sales_qty:,}** 個 （読込CSV: {sales_file_cnt} 件 ／ ASC-001集計値: **{asc001_qty:,}** 個）"
 )
 
-# ---------------------------------------------------------
-# タブ構成
-# ---------------------------------------------------------
 tab1, tab2, tab3, tab4 = st.tabs([
     f"📋 1. 発注検討表（発注点リアルタイム連動版）",
     "🏢 2. 会社（得意先）別・受注番号別 確保リスト（特大ポップアップ）",
@@ -575,9 +539,6 @@ tab1, tab2, tab3, tab4 = st.tabs([
     "🕒 4. 入荷予定・会議履歴 ＆ 売上CSV検証"
 ])
 
-# =========================================================
-# タブ1：発注検討表（Enterキーで下行移動 ＆ 確保数ズレ連動）
-# =========================================================
 with tab1:
     f_col1, f_col2, f_col3 = st.columns([2.6, 1.3, 3.0])
     filter_mode = f_col1.selectbox(
@@ -686,7 +647,6 @@ with tab1:
         .cell-input {{ width: 100%; height: 23px; border: 1px solid #94a3b8; border-radius: 2px; padding: 1px 4px; font-size: 12px; background: rgba(255,255,255,0.9); }}
         .cell-input-point {{ width: 100%; height: 23px; border: 1px solid #3b82f6; border-radius: 2px; padding: 1px 4px; font-size: 12px; font-weight: bold; text-align: right; background: #eff6ff; }}
 
-        /* 特大ポップアップウィンドウ */
         .modal-overlay {{
             display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
             background: rgba(15, 23, 42, 0.7); z-index: 9999; justify-content: center; align-items: center;
@@ -1026,9 +986,6 @@ with tab1:
     """
     components.html(html_tab1, height=680, scrolling=False)
 
-# =========================================================
-# タブ2：会社（得意先）別 確保リスト（特大ポップアップウィンドウ 約2倍）
-# =========================================================
 with tab2:
     if df_yayoi.empty:
         st.warning("確保リストのデータがありません。")
@@ -1273,9 +1230,6 @@ with tab2:
         """
         components.html(html_tab2, height=650, scrolling=False)
 
-# =========================================================
-# タブ3：弥生受注伝票（入力・登録・内容確認 ＆ 検索呼び出し）
-# =========================================================
 with tab3:
     max_seq = 0
     if os.path.exists(MANUAL_YAYOI_CSV):
@@ -1603,7 +1557,6 @@ with tab3:
             st.success(f"🗑️ 受注番号『{in_ono}』を削除しました。")
             st.rerun()
 
-    # 📋 登録済み伝票の常時確認エリア（画面下部）
     st.markdown("---")
     st.subheader("📋 登録済み伝票一覧（手入力保存分 ＆ 確保データ）")
     if os.path.exists(MANUAL_YAYOI_CSV):
@@ -1624,9 +1577,6 @@ with tab3:
     else:
         st.info("手入力で新しく登録された伝票はまだありません。上のフォームから登録できます。")
 
-# =========================================================
-# タブ4：入荷予定・会議履歴 ＆ 売上CSV検証
-# =========================================================
 with tab4:
     st.subheader("🔍 売上CSV 品番別・ファイル別 集計明細チェック")
     if df_sales_detail.empty:
