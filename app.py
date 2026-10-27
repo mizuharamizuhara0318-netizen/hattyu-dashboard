@@ -33,23 +33,6 @@ st.markdown("""
         padding-bottom: 4px;
         border-bottom: 3px solid #2563eb;
     }
-    .yayoi-slip-header {
-        background-color: #2e6b5e;
-        color: white;
-        padding: 8px 14px;
-        font-weight: bold;
-        font-size: 15px;
-        border-radius: 6px 6px 0 0;
-        margin-top: 6px;
-    }
-    .yayoi-slip-body {
-        background-color: #f2f7f5;
-        border: 2px solid #2e6b5e;
-        border-top: none;
-        border-radius: 0 0 6px 6px;
-        padding: 14px;
-        margin-bottom: 14px;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -498,7 +481,6 @@ if df_main.empty:
     st.error("⚠️ 『発注検討表.xlsx』が見つかりません。右上の「📂 売上CSV ＆ 最新Excelの読込・更新」から『発注検討表.xlsx』をアップロードしてください。")
     st.stop()
 
-# 弥生確保リストの実データを完全に紐づけ（リストにない商品は0確定）
 marufuji_dict = {}
 yayoi_dict = {}
 if not df_yayoi.empty:
@@ -589,7 +571,7 @@ st.caption(
 tab1, tab2, tab3, tab4 = st.tabs([
     f"📋 1. 発注検討表（発注点リアルタイム連動版）",
     "🏢 2. 会社（得意先）別・受注番号別 確保リスト（特大ポップアップ）",
-    "💻 3. 弥生受注伝票（入力・登録・内容確認）",
+    "💻 3. 弥生受注伝票（コード・商品名・倉庫名 分離版 ／ 最大100行）",
     "🕒 4. 入荷予定・会議履歴 ＆ 売上CSV検証"
 ])
 
@@ -690,7 +672,7 @@ with tab1:
         .w-dec {{ width: 220px; min-width: 220px; }}
 
         .bg-cyan {{ background-color: #67e8f9 !important; }}
-        .bg-flag-neg {{ background-color: #fecdd3 !important; color: #be123c !important; font-weight: bold; }}
+        .bg-flag-neg {{ background-color: #fecdd3 !important; color: #be123c; font-weight: bold; }}
         .bg-green {{ background-color: #a3e635 !important; }}
         .bg-pink-rate {{ background-color: #fbcfe8 !important; color: #be123c; font-weight: bold; }}
         .bg-yellow-ro {{ background-color: #fef08a !important; color: #1e293b; }}
@@ -1331,7 +1313,6 @@ with tab3:
     slip_state = st.session_state["slip_editor_state"]
     v_key = slip_state.get("version", 1)
 
-    # 🔍 登録済み伝票の検索・編集画面への呼び出しモーダル
     @st.dialog("🔍 登録済み伝票を検索・呼び出し", width="large")
     def open_yayoi_search_modal():
         st.caption("💡 登録されている伝票を受注番号ごとに一覧表示しています。行を選択して「編集画面に開く」を押すと入力フォームに呼び出せます。")
