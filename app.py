@@ -160,23 +160,7 @@ def load_excel_master(file_source):
         st.error(f"発注検討表の読み込みエラー: {e}")
         return pd.DataFrame(), pd.DataFrame(), "前回決定事項"
 
-    target_df = None
-    # シートが1つだけ、または最新シートを指定
-    if len(all_sheets) == 1:
-        target_df = list(all_sheets.values())[0]
-    else:
-        for s_name in ["マスター (新) (5)", "マスター (新)", "81002", "80918"]:
-            if s_name in all_sheets:
-                target_df = all_sheets[s_name]
-                break
-        if target_df is None:
-            for s_name, df_s in all_sheets.items():
-                if "マスター" in str(s_name) and len(df_s) > 5:
-                    target_df = df_s
-                    break
-
-    if target_df is None or target_df.empty:
-        target_df = list(all_sheets.values())[0]
+    target_df = list(all_sheets.values())[0]
 
     header_idx = 0
     for idx in range(min(15, len(target_df))):
@@ -212,7 +196,6 @@ def load_excel_master(file_source):
         elif "前回決定事項" in c and "prev_dec" not in col_map: col_map["prev_dec"] = i
         elif "決定事項" in c and "curr_dec" not in col_map: col_map["curr_dec"] = i
 
-    # フォールバック
     c_center = col_map.get("center", 1)
     c_code = col_map.get("code", 2)
     c_name = col_map.get("name", 3)
@@ -251,8 +234,6 @@ def load_excel_master(file_source):
         p1_val = int(round(to_num(r[c_point1]), 0)) if c_point1 < len(r) and not is_na_val(r[c_point1]) else 0
         p2_val = int(round(to_num(r[c_point2]), 0)) if 0 <= c_point2 < len(r) and not is_na_val(r[c_point2]) else 0
         free_val = int(to_num(r[c_free])) if c_free < len(r) and not is_na_val(r[c_free]) else 0
-
-        # 公式：フリー在庫 - (1課発注点 + 2課発注点)
         flag_val = free_val - (p1_val + p2_val)
 
         rate_raw = to_num(r[c_rate]) if c_rate < len(r) else 0.0
@@ -353,6 +334,7 @@ def load_yayoi_data(file_source):
         df["倉庫名"] = df["倉庫名"].apply(clean_str) if "倉庫名" in df.columns else ""
         df["商品名/摘要"] = df["商品名/摘要"].apply(clean_str) if "商品名/摘要" in df.columns else ""
         df["担当者名"] = df["担当者名"].apply(clean_str) if "担当者名" in df.columns else ""
+        df["単価"] = pd.to_numeric(df["単価"], errors="coerce").fillna(0).astype(int) if "単価" in df.columns else 0
 
         empty_mask = df["受注番号"] == ""
         if empty_mask.any():
@@ -360,7 +342,7 @@ def load_yayoi_data(file_source):
                 lambda r: f"Y-{r['受注日'].replace('-','')}-{abs(hash(r['得意先名']))%10000:04d}", axis=1
             )
     else:
-        df = pd.DataFrame(columns=["受注番号", "得意先名", "商品コード", "商品名/摘要", "受注残数", "数量", "受注日", "納入期日", "備考", "倉庫名", "担当者名", "受注日_dt", "納入期日_dt"])
+        df = pd.DataFrame(columns=["受注番号", "得意先名", "商品コード", "商品名/摘要", "受注残数", "数量", "単価", "受注日", "納入期日", "備考", "倉庫名", "担当者名", "受注日_dt", "納入期日_dt"])
 
     if os.path.exists(MANUAL_YAYOI_CSV):
         try:
@@ -382,9 +364,6 @@ def load_yayoi_data(file_source):
 
 @st.cache_data
 def load_sales_csvs(uploaded_files, valid_norm_codes_tuple):
-    """
-    弥生販売の売上CSV（P列: 商品コード, X列: 数量）から売上数を正確に集計
-    """
     valid_codes = set(valid_norm_codes_tuple)
     all_records = []
 
@@ -426,10 +405,8 @@ def load_sales_csvs(uploaded_files, valid_norm_codes_tuple):
             if len(row_vals) < 16:
                 continue
 
-            # P列 (index 15: 商品コード)
             c_val = normalize_code(row_vals[15])
             if c_val in valid_codes:
-                # X列 (index 23: 数量)
                 q_val = to_num(row_vals[23]) if len(row_vals) > 23 else 0.0
                 if q_val == 0:
                     for test_i in range(16, min(len(row_vals), 26)):
@@ -486,6 +463,24 @@ if df_main.empty:
     st.error("⚠️ 『発注検討表.xlsx』が見つかりません。右上の「📂 売上CSV ＆ 最新Excelの読込・更新」から『発注検討表.xlsx』をアップロードしてください。")
     st.stop()
 
+# 弥生確保リストの実データを最優先で紐づけ（maxで上書きしない）
+marufuji_dict = {}
+yayoi_dict = {}
+if not df_yayoi.empty:
+    df_yayoi["品番_正規化"] = df_yayoi["商品コード"].apply(normalize_code)
+    yayoi_real_totals = df_yayoi.groupby("品番_正規化")["受注残数"].sum().to_dict()
+    for idx_m, r_m in df_main.iterrows():
+        cn = r_m["品番_正規化"]
+        if cn in yayoi_real_totals:
+            df_main.at[idx_m, "在庫確保_弥生"] = yayoi_real_totals[cn]
+
+    for code_n, grp in df_yayoi.groupby("品番_正規化", sort=False):
+        grp_sorted = grp.sort_values(by=["受注日_dt", "納入期日_dt"], ascending=[False, False], na_position="last")
+        yayoi_dict[code_n] = grp_sorted[["受注番号", "得意先名", "受注残数", "数量", "受注日", "納入期日", "倉庫名", "備考", "担当者名"]].to_dict(orient="records")
+        maru_grp = grp_sorted[grp_sorted["得意先名"].str.contains("丸藤", na=False)]
+        if not maru_grp.empty:
+            marufuji_dict[code_n] = maru_grp[["受注番号", "得意先名", "受注残数", "数量", "受注日", "納入期日", "倉庫名", "備考", "担当者名"]].to_dict(orient="records")
+
 item_wh_map = {}
 item_name_map = {}
 for it in master_items:
@@ -514,18 +509,6 @@ if not sales_series.empty:
     df_main["今月売れ数"] = df_main["品番_正規化"].map(sales_series).fillna(0).astype(int)
 else:
     df_main["今月売れ数"] = 0
-
-# 丸藤確保と全体確保の明確な分離
-marufuji_dict = {}
-yayoi_dict = {}
-if not df_yayoi.empty:
-    df_yayoi["品番_正規化"] = df_yayoi["商品コード"].apply(normalize_code)
-    for code_n, grp in df_yayoi.groupby("品番_正規化", sort=False):
-        grp_sorted = grp.sort_values(by=["受注日_dt", "納入期日_dt"], ascending=[False, False], na_position="last")
-        yayoi_dict[code_n] = grp_sorted[["受注番号", "得意先名", "受注残数", "数量", "受注日", "納入期日", "倉庫名", "備考", "担当者名"]].to_dict(orient="records")
-        maru_grp = grp_sorted[grp_sorted["得意先名"].str.contains("丸藤", na=False)]
-        if not maru_grp.empty:
-            marufuji_dict[code_n] = maru_grp[["受注番号", "得意先名", "受注残数", "数量", "受注日", "納入期日", "倉庫名", "備考", "担当者名"]].to_dict(orient="records")
 
 hist_dict = {}
 if not df_hist.empty:
@@ -661,7 +644,7 @@ with tab1:
         .w-dec {{ width: 220px; min-width: 220px; }}
 
         .bg-cyan {{ background-color: #67e8f9 !important; }}
-        .bg-flag-neg {{ background-color: #fecdd3 !important; color: #be123c !important; font-weight: bold; }}
+        .bg-flag-neg {{ background-color: #fecdd3 !important; color: #be123c; font-weight: bold; }}
         .bg-green {{ background-color: #a3e635 !important; }}
         .bg-pink-rate {{ background-color: #fbcfe8 !important; color: #be123c; font-weight: bold; }}
         .bg-yellow-ro {{ background-color: #fef08a !important; color: #1e293b; }}
@@ -674,7 +657,6 @@ with tab1:
         .cell-input {{ width: 100%; height: 23px; border: 1px solid #94a3b8; border-radius: 2px; padding: 1px 4px; font-size: 12px; background: rgba(255,255,255,0.9); }}
         .cell-input-point {{ width: 100%; height: 23px; border: 1px solid #3b82f6; border-radius: 2px; padding: 1px 4px; font-size: 12px; font-weight: bold; text-align: right; background: #eff6ff; }}
 
-        /* 特大ポップアップウィンドウ */
         .modal-overlay {{
             display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
             background: rgba(15, 23, 42, 0.7); z-index: 9999; justify-content: center; align-items: center;
@@ -701,7 +683,7 @@ with tab1:
     </head>
     <body>
     <div class="toolbar">
-        <div class="toolbar-info">表示件数: <span id="row-count">0</span> 件 ｜ 💡 1課・2課発注点は変更すると発注検討フラグが即時自動計算されます</div>
+        <div class="toolbar-info">表示件数: <span id="row-count">0</span> 件 ｜ 💡 1課・2課発注点を変更すると発注検討フラグが即時自動計算されます</div>
         <button class="btn-download" onclick="exportEditedCSV()">📥 編集内容を反映したCSV出力</button>
     </div>
     <div class="table-wrap">
@@ -790,8 +772,7 @@ with tab1:
         const histMap = {hist_json};
         let currentModalIdx = null;
 
-        // 保存された手動発注点および決定事項を復元
-        const savedEdits = JSON.parse(localStorage.getItem("hattyu_edits_v3") || "{{}}");
+        const savedEdits = JSON.parse(localStorage.getItem("hattyu_edits_v4") || "{{}}");
         tableData.forEach(r => {{
             if (savedEdits[r["品番"]]) {{
                 r["1課発注点"] = savedEdits[r["品番"]].p1 ?? r["1課発注点"];
@@ -799,7 +780,6 @@ with tab1:
                 r["入荷予定日_ロジザード"] = savedEdits[r["品番"]].ndate ?? r["入荷予定日_ロジザード"];
                 r["決定事項"] = savedEdits[r["品番"]].dec ?? r["決定事項"];
                 r["発注日"] = savedEdits[r["品番"]].odate ?? r["発注日"];
-                // フラグの再計算: フリー在庫 - (1課 + 2課)
                 r["発注検討フラグ"] = Number(r["入荷後のフリー在庫"] || 0) - (Number(r["1課発注点"] || 0) + Number(r["2課発注点"] || 0));
             }}
         }});
@@ -873,7 +853,7 @@ with tab1:
         }}
 
         function saveToStorage(hinban, rowObj) {{
-            const store = JSON.parse(localStorage.getItem("hattyu_edits_v3") || "{{}}");
+            const store = JSON.parse(localStorage.getItem("hattyu_edits_v4") || "{{}}");
             store[hinban] = {{
                 p1: rowObj["1課発注点"],
                 p2: rowObj["2課発注点"],
@@ -881,7 +861,7 @@ with tab1:
                 dec: rowObj["決定事項"],
                 odate: rowObj["発注日"]
             }};
-            localStorage.setItem("hattyu_edits_v3", JSON.stringify(store));
+            localStorage.setItem("hattyu_edits_v4", JSON.stringify(store));
         }}
 
         function updateCell(idx, field, val) {{
