@@ -195,11 +195,8 @@ def load_excel_master(file_source):
         elif "入荷予定日" in c and "ndate" not in col_map: col_map["ndate"] = i
         elif "入荷予定" in c and "roji_in" not in col_map: col_map["roji_in"] = i
         elif "ロジザード" in c and ("確保" in c or "在庫確保" in c) and "roji_sec" not in col_map: col_map["roji_sec"] = i
-        elif "弥生" in c and ("確保" in c or "在庫確保" in c) and "yayoi_sec" not in col_map: col_map["yayoi_sec"] = i
-        elif "丸藤" in c and "marufuji_sec" not in col_map: col_map["marufuji_sec"] = i
         elif "ズレ" in c and "zure" not in col_map: col_map["zure"] = i
         elif ("フリー在庫" in c or "有効数量" in c) and "free" not in col_map: col_map["free"] = i
-        elif "発注検討" in c and "flag" not in col_map: col_map["flag"] = i
         elif "回転率" in c and "rate" not in col_map: col_map["rate"] = i
         elif ("リンベル" in c or "ﾘﾝﾍﾞﾙ" in c) and "rinbell" not in col_map: col_map["rinbell"] = i
         elif "前回決定事項" in c and "prev_dec" not in col_map: col_map["prev_dec"] = i
@@ -218,11 +215,8 @@ def load_excel_master(file_source):
     c_roji_in = col_map.get("roji_in", 16)
     c_ndate = col_map.get("ndate", 18)
     c_roji_sec = col_map.get("roji_sec", 19)
-    c_yayoi_sec = col_map.get("yayoi_sec", 20)
     c_zure = col_map.get("zure", 21)
-    c_marufuji = col_map.get("marufuji_sec", 22)
     c_free = col_map.get("free", 23)
-    c_flag = col_map.get("flag", 24)
     c_rate = col_map.get("rate", 25)
     c_rin = col_map.get("rinbell", 26)
     c_prev = col_map.get("prev_dec", 27)
@@ -268,8 +262,8 @@ def load_excel_master(file_source):
             "入荷予定数_ロジザード": int(to_num(r[c_roji_in])) if c_roji_in < len(r) else 0,
             "入荷予定日_ロジザード": ndate_val,
             "確保数_ロジザード": int(to_num(r[c_roji_sec])) if c_roji_sec < len(r) else 0,
-            "在庫確保_弥生": int(to_num(r[c_yayoi_sec])) if c_yayoi_sec < len(r) else 0,
-            "在庫確保_丸藤": int(to_num(r[c_marufuji])) if c_marufuji < len(r) else 0,
+            "在庫確保_弥生": 0,
+            "在庫確保_丸藤": 0,
             "確保数のズレ": int(to_num(r[c_zure])) if c_zure < len(r) else 0,
             "入荷後のフリー在庫": free_val,
             "発注検討フラグ": flag_val,
@@ -333,7 +327,6 @@ def load_yayoi_data(file_source):
                 continue
 
     if not df.empty:
-        # 列名で特定または列インデックスで直接抽出
         col_c_code = "商品コード" if "商品コード" in df.columns else df.columns[13]
         col_c_qty = "数量" if "数量" in df.columns else df.columns[21]
         col_c_cust = "得意先名" if "得意先名" in df.columns else df.columns[5]
@@ -367,7 +360,6 @@ def load_yayoi_data(file_source):
     else:
         df = pd.DataFrame(columns=["受注番号", "得意先名", "商品コード", "数量", "受注残数", "受注日", "納入期日", "備考", "倉庫名", "担当者名", "受注日_dt", "納入期日_dt"])
 
-    # 手入力伝票も結合
     if os.path.exists(MANUAL_YAYOI_CSV):
         try:
             df_man = pd.read_csv(MANUAL_YAYOI_CSV).fillna("")
@@ -427,22 +419,26 @@ def load_sales_csvs(uploaded_files, valid_norm_codes_tuple):
 
         loaded_file_count += 1
 
-        for r_i in range(len(df_s)):
+        code_col = 15
+        qty_col = 23
+        start_row = 0
+        for r_i in range(min(5, len(df_s))):
+            row_str = [str(x).strip() for x in df_s.iloc[r_i].values]
+            if "商品コード" in row_str:
+                start_row = r_i + 1
+                code_col = row_str.index("商品コード")
+                if "数量" in row_str:
+                    qty_col = row_str.index("数量")
+                break
+
+        for r_i in range(start_row, len(df_s)):
             row_vals = df_s.iloc[r_i].values
-            if len(row_vals) < 16:
+            if len(row_vals) <= max(code_col, qty_col):
                 continue
 
-            # P列 (index 15: 商品コード)
-            c_val = normalize_code(row_vals[15])
+            c_val = normalize_code(row_vals[code_col])
             if c_val in valid_codes:
-                # X列 (index 23: 数量)
-                q_val = to_num(row_vals[23]) if len(row_vals) > 23 else 0.0
-                if q_val == 0:
-                    for test_i in range(16, min(len(row_vals), 26)):
-                        qv = to_num(row_vals[test_i])
-                        if 0 < qv < 10000:
-                            q_val = qv
-                            break
+                q_val = to_num(row_vals[qty_col])
                 if q_val > 0:
                     d_val = clean_str(row_vals[3]) if len(row_vals) > 3 else ""
                     all_records.append({
@@ -492,7 +488,7 @@ if df_main.empty:
     st.error("⚠️ 『発注検討表.xlsx』が見つかりません。右上の「📂 売上CSV ＆ 最新Excelの読込・更新」から『発注検討表.xlsx』をアップロードしてください。")
     st.stop()
 
-# 弥生確保リストの実データを最優先で紐づけ（maxで上書きせず、リストの実績を採用）
+# 弥生確保リストの実データを完全に紐づけ（リストにない商品は0確定）
 marufuji_dict = {}
 yayoi_dict = {}
 if not df_yayoi.empty:
@@ -509,21 +505,18 @@ if not df_yayoi.empty:
     df_maru_only = df_yayoi[df_yayoi["得意先名"].apply(is_marufuji_name)]
     marufuji_real_totals = df_maru_only.groupby("品番_正規化")["数量"].sum().to_dict()
 
-    for idx_m, r_m in df_main.iterrows():
-        cn = r_m["品番_正規化"]
-        if cn in yayoi_real_totals:
-            df_main.at[idx_m, "在庫確保_弥生"] = yayoi_real_totals[cn]
-        if cn in marufuji_real_totals:
-            df_main.at[idx_m, "在庫確保_丸藤"] = marufuji_real_totals[cn]
+    # リストにない商品は確実に0にする
+    df_main["在庫確保_弥生"] = df_main["品番_正規化"].map(yayoi_real_totals).fillna(0).astype(int)
+    df_main["在庫確保_丸藤"] = df_main["品番_正規化"].map(marufuji_real_totals).fillna(0).astype(int)
 
     # ポップアップ用の辞書作成
     for code_n, grp in df_yayoi.groupby("品番_正規化", sort=False):
         grp_sorted = grp.sort_values(by=["受注日_dt", "納入期日_dt"], ascending=[False, False], na_position="last")
-        yayoi_dict[code_n] = grp_sorted[["受注番号", "得意先名", "数量", "受注残数", "受注日", "納入期日", "倉庫名", "備考", "担当者名"]].to_dict(orient="records")
+        yayoi_dict[code_n] = grp_sorted[["受注番号", "得意先名", "数量", "受注日", "納入期日", "倉庫名", "備考", "担当者名"]].to_dict(orient="records")
         
         maru_grp = grp_sorted[grp_sorted["得意先名"].apply(is_marufuji_name)]
         if not maru_grp.empty:
-            marufuji_dict[code_n] = maru_grp[["受注番号", "得意先名", "数量", "受注残数", "受注日", "納入期日", "倉庫名", "備考", "担当者名"]].to_dict(orient="records")
+            marufuji_dict[code_n] = maru_grp[["受注番号", "得意先名", "数量", "受注日", "納入期日", "倉庫名", "備考", "担当者名"]].to_dict(orient="records")
 
 item_wh_map = {}
 item_name_map = {}
@@ -688,7 +681,7 @@ with tab1:
         .w-dec {{ width: 220px; min-width: 220px; }}
 
         .bg-cyan {{ background-color: #67e8f9 !important; }}
-        .bg-flag-neg {{ background-color: #fecdd3 !important; color: #be123c !important; font-weight: bold; }}
+        .bg-flag-neg {{ background-color: #fecdd3 !important; color: #be123c; font-weight: bold; }}
         .bg-green {{ background-color: #a3e635 !important; }}
         .bg-pink-rate {{ background-color: #fbcfe8 !important; color: #be123c; font-weight: bold; }}
         .bg-yellow-ro {{ background-color: #fef08a !important; color: #1e293b; }}
@@ -939,7 +932,7 @@ with tab1:
 
             let targetList = [];
             if (mode === 'marufuji') {{
-                document.getElementById("modal-sub-title").innerHTML = "🏢 【丸藤専用】確保リスト（丸藤の受注残のみ表示）";
+                document.getElementById("modal-sub-title").innerHTML = "🏢 【丸藤専用】確保リスト（丸藤の受注のみ表示）";
                 targetList = marufujiMap[codeNorm] || [];
             }} else {{
                 document.getElementById("modal-sub-title").innerHTML = "🏢 得意先別・弥生確保リスト（受注日の最新順）";
@@ -947,7 +940,7 @@ with tab1:
             }}
 
             if (targetList.length === 0) {{
-                document.getElementById("modal-yayoi-area").innerHTML = `<div style="padding:16px; font-size:14.5px; color:#64748b; background:#f8fafc;">該当する受注残データはありません。</div>`;
+                document.getElementById("modal-yayoi-area").innerHTML = `<div style="padding:16px; font-size:14.5px; color:#64748b; background:#f8fafc;">該当する受注データはありません。</div>`;
             }} else {{
                 let yHtml = `<table class="sub-table"><thead><tr><th>受注番号</th><th>得意先名</th><th>数量</th><th>受注日</th><th>納入期日</th><th>倉庫名</th><th>担当者</th><th>備考</th></tr></thead><tbody>`;
                 targetList.forEach(y => {{
