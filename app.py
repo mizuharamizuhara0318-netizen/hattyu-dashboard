@@ -485,21 +485,35 @@ def load_sales_csvs_universal(uploaded_files, valid_norm_codes_tuple):
     return summary_series, loaded_file_count, df_rec, period_buckets
 
 # ---------------------------------------------------------
-# ヘッダー ＆ アップローダー
+# ヘッダー ＆ アップローダー（session_state保持でリセット防止）
 # ---------------------------------------------------------
+if "persisted_sales_files" not in st.session_state:
+    st.session_state["persisted_sales_files"] = None
+
 head_col1, head_col2 = st.columns([3.2, 2.0])
 with head_col1:
     st.markdown('<div class="app-header">📊 発注検討表 ＆ 弥生受注管理システム（完全連動版）</div>', unsafe_allow_html=True)
 with head_col2:
     with st.expander("📂 売上CSV・ZIP ＆ 最新Excelの読込・更新", expanded=False):
-        up_sales = st.file_uploader("🔥 売上CSV または ZIPファイル（複数選択・ZIP一括ドロップ対応）", type=["csv", "zip"], accept_multiple_files=True, key="up_s")
+        up_sales_raw = st.file_uploader("🔥 売上CSV または ZIPファイル（複数選択・ZIP一括ドロップ対応）", type=["csv", "zip"], accept_multiple_files=True, key="up_s_raw")
+        if up_sales_raw:
+            st.session_state["persisted_sales_files"] = up_sales_raw
+        
+        up_sales = st.session_state["persisted_sales_files"]
+
         u_c1, u_c2 = st.columns(2)
         up_main = u_c1.file_uploader("📋 発注検討表.xlsx", type=["xlsx"], key="up_m")
         up_yayoi = u_c2.file_uploader("📑 弥生確保リスト.xlsx", type=["xlsx"], key="up_y")
         u_c3, u_c4 = st.columns(2)
         up_comp = u_c3.file_uploader("🏢 弥生会社名.xlsx", type=["xlsx"], key="up_comp")
         up_item = u_c4.file_uploader("📦 弥生商品番号.xlsx", type=["xlsx"], key="up_item")
-        if st.button("🔄 最新状態に再読み込み", use_container_width=True):
+
+        col_btn1, col_btn2 = st.columns(2)
+        if col_btn1.button("🔄 最新状態に再読み込み", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
+        if col_btn2.button("🗑️ 読込CSVをクリア", use_container_width=True):
+            st.session_state["persisted_sales_files"] = None
             st.cache_data.clear()
             st.rerun()
 
@@ -896,7 +910,7 @@ with tab1:
                     <td class="w-num"><input type="number" class="cell-input-point" id="point2-${{idx}}" value="${{r["2課発注点"]}}" oninput="tableData[${{idx}}]['2課発注点']=Number(this.value); recalculateRow(${{idx}})" onkeydown="handleKeyDown(event, 'point2', ${{idx}})"></td>
                     <td class="w-num bg-cyan">${{fmtNum(r["在庫数_ロジザード"])}}</td>
                     <td class="w-num bg-cyan">${{fmtNum(r["入荷予定数_ロジザード"])}}</td>
-                    <td class="w-date bg-cyan"><input type="text" class="cell-input" id="ndate-${{idx}}" value="${{r["入荷予定日_ロジザード"] || ""}}" oninput="updateCell(${{idx}}, '入荷予定日_ロジザード', this.value)" onkeydown="handleKeyDown(event, 'ndate', ${{idx}})"></td>
+                    <td class="w-date bg-cyan"><input type="text" class="cell-input" id="ndate-${{idx}}" value="${{r["入荷予定日_ロジザード"] || ""}}" oninput="updateCell(${{idx}}, '入荷予定日_ロジザード", this.value)" onkeydown="handleKeyDown(event, 'ndate', ${{idx}})"></td>
                     <td class="w-num bg-cyan">${{fmtNum(r["確保数_ロジザード"])}}</td>
                     <td class="w-num bg-cyan"><span class="click-link" onclick="openModal(${{idx}}, 'yayoi')">${{fmtNum(r["在庫確保_弥生"])}}</span></td>
                     <td class="w-num bg-cyan"><span class="click-link" style="color:#b91c1c;" onclick="openModal(${{idx}}, 'marufuji')">${{fmtNum(r["在庫確保_丸藤"])}}</span></td>
@@ -907,7 +921,7 @@ with tab1:
                     <td class="w-num ${{rateCls}}">${{fmtNum(r["在庫回転率"]) + "%"}}</td>
                     <td class="w-num">${{fmtNum(r["リンベル確保数"])}}</td>
                     <td class="w-prev-dec bg-yellow-ro" title="${{r["前回決定事項"] || ""}}">${{r["前回決定事項"] || ""}}</td>
-                    <td class="w-dec bg-yellow-edit"><input type="text" class="cell-input" id="dec-${{idx}}" value="${{r["決定事項"] || ""}}" oninput="updateCell(${{idx}}, '決定事項', this.value)" onkeydown="handleKeyDown(event, 'dec', ${{idx}})"></td>
+                    <td class="w-dec bg-yellow-edit"><input type="text" class="cell-input" id="dec-${{idx}}" value="${{r["決定事項"] || ""}}" oninput="updateCell(${{idx}}, '決定事項", this.value)" onkeydown="handleKeyDown(event, 'dec', ${{idx}})"></td>
                     <td class="w-date bg-yellow-edit"><input type="text" class="cell-input" id="odate-${{idx}}" value="${{r["発注日"] || ""}}" oninput="updateCell(${{idx}}, '発注日', this.value)" onkeydown="handleKeyDown(event, 'odate', ${{idx}})"></td>
                 </tr>`;
             }});
