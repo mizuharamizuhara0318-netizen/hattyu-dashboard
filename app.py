@@ -163,22 +163,19 @@ def load_item_master(file_source):
 def load_excel_master(file_source):
     if file_source is None:
         return pd.DataFrame(), pd.DataFrame(), "前回決定事項"
-    target_df = None
     try:
         all_sheets = pd.read_excel(file_source, sheet_name=None, header=None)
-        target_df = list(all_sheets.values())[0]
     except Exception as e:
-        # openpyxlのフィルタXMLエラー等を強制回避して読み込む
         try:
             wb = openpyxl.load_workbook(file_source, data_only=True, keep_vba=False)
             ws = wb[wb.sheetnames[0]]
-            data = []
-            for row in ws.iter_rows(values_only=True):
-                data.append(list(row))
-            target_df = pd.DataFrame(data)
+            data = [[cell.value for cell in row] for row in ws.iter_rows()]
+            all_sheets = {wb.sheetnames[0]: pd.DataFrame(data)}
         except Exception as ex:
             st.error(f"発注検討表の読み込みエラー: {ex}")
             return pd.DataFrame(), pd.DataFrame(), "前回決定事項"
+
+    target_df = list(all_sheets.values())[0]
 
     header_idx = 0
     for idx in range(min(15, len(target_df))):
@@ -285,7 +282,30 @@ def load_excel_master(file_source):
         })
 
     df_main = pd.DataFrame(items)
-    return df_main, pd.DataFrame(columns=["会議日", "シート", "品番", "決定事項"]), prev_col_title
+
+    hist_list = []
+    for s_name, df_s in all_sheets.items():
+        s_str = str(s_name).strip()
+        if s_str.isdigit() and len(s_str) == 5 and not df_s.empty:
+            h_row_vals = [clean_str(x) for x in df_s.iloc[0].values]
+            h_col_idx = next((i for i, c in enumerate(h_row_vals) if c == "品番"), 2)
+            k_cols = [i for i, c in enumerate(h_row_vals) if c and "決定事項" in c and "前回" not in c]
+            s_clean = s_str.lstrip("0")
+            rest = s_clean[1:] if s_clean.startswith("8") else s_clean
+            dt_str = f"2026-{rest[:2]}-{rest[2:]}" if len(rest) == 4 else (f"2026-0{rest[0]}-{rest[1:]}" if len(rest) == 3 else s_str)
+            for _, r_d in df_s.iloc[1:].iterrows():
+                r_vals = r_d.values
+                if len(r_vals) <= h_col_idx:
+                    continue
+                c_val = clean_str(r_vals[h_col_idx])
+                if not c_val:
+                    continue
+                for kc in k_cols:
+                    if kc < len(r_vals) and clean_str(r_vals[kc]) not in ("", "0"):
+                        hist_list.append({"会議日": dt_str, "シート": s_str, "品番": c_val, "決定事項": clean_str(r_vals[kc])})
+
+    df_hist = pd.DataFrame(hist_list).drop_duplicates(subset=["会議日", "品番", "決定事項"]) if hist_list else pd.DataFrame(columns=["会議日", "シート", "品番", "決定事項"])
+    return df_main, df_hist, prev_col_title
 
 @st.cache_data
 def load_yayoi_data(file_source):
@@ -521,6 +541,20 @@ if not sales_series.empty:
     df_main["今月売れ数"] = df_main["品番_正規化"].map(sales_series).fillna(0).astype(int)
 else:
     df_main["今月売れ数"] = 0
+
+hist_dict = {} if 'df_hist' in locals() and df_hist is not None and not df_hist.empty else {}
+
+if os.path.exists(SAVE_CSV):
+    try:
+        df_saved = pd.read_csv(SAVE_CSV).fillna("")
+        for _, s_row in df_saved.iterrows():
+            c = clean_str(s_row["品番"])
+            if c in df_main["品番"].values:
+                df_main.loc[df_main["品番"] == c, "入荷予定日_ロジザード"] = clean_str(s_row.get("入荷予定日_ロジザード", ""))
+                df_main.loc[df_main["品番"] == c, "決定事項"] = clean_str(s_row.get("決定事項", ""))
+                df_main.loc[df_main["品番"] == c, "発注日"] = clean_str(s_row.get("発注日", ""))
+    except Exception:
+        pass
 
 m_df = df_main.copy()
 
