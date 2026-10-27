@@ -209,7 +209,6 @@ def load_excel_master(file_source):
         st.error(f"発注検討表の読み込みエラー: {e}")
         return pd.DataFrame(), pd.DataFrame(), "前回決定事項"
 
-    # 『マスター (新)』シートを最優先で探索
     target_df = None
     if "マスター (新)" in all_sheets:
         target_df = all_sheets["マスター (新)"]
@@ -386,10 +385,6 @@ def load_yayoi_data(file_source):
 
 @st.cache_data
 def load_sales_csvs(uploaded_files, valid_norm_codes_tuple, target_period="76期"):
-    """
-    yayoi_*.csv からP列（商品コード）とX列（数量）を抽出し、
-    73期〜77期（7月〜6月が1期）でフィルタリングして合算する決定版パーサ。
-    """
     valid_codes = set(valid_norm_codes_tuple)
     all_records = []
 
@@ -475,7 +470,6 @@ def load_sales_csvs(uploaded_files, valid_norm_codes_tuple, target_period="76期
 
     df_rec = pd.DataFrame(all_records)
 
-    # 期の判定 (7月〜6月が1期)
     def get_period(d_val):
         d_clean = "".join(filter(str.isdigit, str(d_val)))
         if len(d_clean) >= 8:
@@ -488,17 +482,12 @@ def load_sales_csvs(uploaded_files, valid_norm_codes_tuple, target_period="76期
                         base_y = y + 1
                     else:
                         base_y = y
-                    # 73期: 2022/7-2023/6 => base_y=2023 -> 73
-                    # 74期: 2023/7-2024/6 => base_y=2024 -> 74
-                    # 75期: 2024/7-2025/6 => base_y=2025 -> 75
-                    # 76期: 2025/7-2026/6 => base_y=2026 -> 76
-                    # 77期: 2026/7-2027/6 => base_y=2027 -> 77
                     diff = base_y - 2023
                     period_num = 73 + diff
                     return f"{period_num}期"
             except Exception:
                 pass
-        return "76期" # 日付不明のものは今期(76期)扱い
+        return "76期"
 
     df_rec["期"] = df_rec["date"].apply(get_period)
 
@@ -528,8 +517,6 @@ with head_col2:
         if st.button("🔄 最新状態に再読み込み", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
-else:
-    selected_period = "76期"
 
 main_src = up_main if up_main is not None else MAIN_EXCEL
 yayoi_src = up_yayoi if up_yayoi is not None else YAYOI_EXCEL
