@@ -195,7 +195,6 @@ def load_excel_master(file_source):
         elif "入荷予定日" in c and "ndate" not in col_map: col_map["ndate"] = i
         elif "入荷予定" in c and "roji_in" not in col_map: col_map["roji_in"] = i
         elif "ロジザード" in c and ("確保" in c or "在庫確保" in c) and "roji_sec" not in col_map: col_map["roji_sec"] = i
-        elif "ズレ" in c and "zure" not in col_map: col_map["zure"] = i
         elif ("フリー在庫" in c or "有効数量" in c) and "free" not in col_map: col_map["free"] = i
         elif "回転率" in c and "rate" not in col_map: col_map["rate"] = i
         elif ("リンベル" in c or "ﾘﾝﾍﾞﾙ" in c) and "rinbell" not in col_map: col_map["rinbell"] = i
@@ -215,7 +214,6 @@ def load_excel_master(file_source):
     c_roji_in = col_map.get("roji_in", 16)
     c_ndate = col_map.get("ndate", 18)
     c_roji_sec = col_map.get("roji_sec", 19)
-    c_zure = col_map.get("zure", 21)
     c_free = col_map.get("free", 23)
     c_rate = col_map.get("rate", 25)
     c_rin = col_map.get("rinbell", 26)
@@ -239,6 +237,8 @@ def load_excel_master(file_source):
         free_val = int(to_num(r[c_free])) if c_free < len(r) and not is_na_val(r[c_free]) else 0
         flag_val = free_val - (p1_val + p2_val)
 
+        sec_roji = int(to_num(r[c_roji_sec])) if c_roji_sec < len(r) else 0
+
         rate_raw = to_num(r[c_rate]) if c_rate < len(r) else 0.0
         rate_val = int(round(rate_raw * 100, 0)) if abs(rate_raw) <= 5.0 else int(round(rate_raw, 0))
 
@@ -261,10 +261,10 @@ def load_excel_master(file_source):
             "在庫数_ロジザード": int(to_num(r[c_roji_stock])) if c_roji_stock < len(r) else 0,
             "入荷予定数_ロジザード": int(to_num(r[c_roji_in])) if c_roji_in < len(r) else 0,
             "入荷予定日_ロジザード": ndate_val,
-            "確保数_ロジザード": int(to_num(r[c_roji_sec])) if c_roji_sec < len(r) else 0,
+            "確保数_ロジザード": sec_roji,
             "在庫確保_弥生": 0,
             "在庫確保_丸藤": 0,
-            "確保数のズレ": int(to_num(r[c_zure])) if c_zure < len(r) else 0,
+            "確保数のズレ": sec_roji,  # 確保数ロジザード - 在庫確保弥生 - 在庫確保丸藤
             "入荷後のフリー在庫": free_val,
             "発注検討フラグ": flag_val,
             "在庫回転率": rate_val,
@@ -303,10 +303,6 @@ def load_excel_master(file_source):
 
 @st.cache_data
 def load_yayoi_data(file_source):
-    """
-    弥生確保リスト.xlsx を読み込み
-    F列(index 5): 得意先名, N列(index 13): 商品コード, V列(index 21): 数量
-    """
     df = pd.DataFrame()
     sources = [file_source, YAYOI_EXCEL, "弥生確保リスト.xlsx", r"G:\マイドライブ\発注検討\弥生確保リスト.xlsx"]
     for src in sources:
@@ -380,9 +376,6 @@ def load_yayoi_data(file_source):
 
 @st.cache_data
 def load_sales_csvs(uploaded_files, valid_norm_codes_tuple):
-    """
-    弥生販売の売上CSV（P列: 商品コード, X列: 数量）から売上数を正確に集計
-    """
     valid_codes = set(valid_norm_codes_tuple)
     all_records = []
 
@@ -509,6 +502,9 @@ if not df_yayoi.empty:
     df_main["在庫確保_弥生"] = df_main["品番_正規化"].map(yayoi_real_totals).fillna(0).astype(int)
     df_main["在庫確保_丸藤"] = df_main["品番_正規化"].map(marufuji_real_totals).fillna(0).astype(int)
 
+    # 確保数のズレ = 確保数ロジザード - 在庫確保弥生 - 在庫確保丸藤
+    df_main["確保数のズレ"] = df_main["確保数_ロジザード"] - df_main["在庫確保_弥生"] - df_main["在庫確保_丸藤"]
+
     # ポップアップ用の辞書作成
     for code_n, grp in df_yayoi.groupby("品番_正規化", sort=False):
         grp_sorted = grp.sort_values(by=["受注日_dt", "納入期日_dt"], ascending=[False, False], na_position="last")
@@ -585,7 +581,7 @@ tab1, tab2, tab3, tab4 = st.tabs([
 ])
 
 # =========================================================
-# タブ1：発注検討表（1課・2課発注点入力で検討フラグが即時連動）
+# タブ1：発注検討表（Enterキーで下行移動 ＆ 確保数ズレ連動）
 # =========================================================
 with tab1:
     f_col1, f_col2, f_col3 = st.columns([2.6, 1.3, 3.0])
@@ -688,6 +684,7 @@ with tab1:
         .bg-yellow-edit {{ background-color: #ffff00 !important; }}
         .bg-sales-hit {{ background-color: #fed7aa !important; font-weight: bold; color: #c2410c; }}
         .bg-hist-ki {{ background-color: #f1f5f9; color: #475569; }}
+        .bg-zure-diff {{ background-color: #ffe4e6 !important; color: #be123c; font-weight: bold; }}
 
         tbody tr:hover td {{ filter: brightness(0.95); }}
         .click-link {{ color: #0284c7; font-weight: bold; text-decoration: underline; cursor: pointer; display: block; width: 100%; }}
@@ -721,7 +718,7 @@ with tab1:
     </head>
     <body>
     <div class="toolbar">
-        <div class="toolbar-info">表示件数: <span id="row-count">0</span> 件 ｜ 💡 1課・2課発注点を入力すると発注検討フラグが即時自動計算されます</div>
+        <div class="toolbar-info">表示件数: <span id="row-count">0</span> 件 ｜ 💡 発注点入力後はEnterキーで即座に下の行へ移動します</div>
         <button class="btn-download" onclick="exportEditedCSV()">📥 編集内容を反映したCSV出力</button>
     </div>
     <div class="table-wrap">
@@ -810,7 +807,8 @@ with tab1:
         const histMap = {hist_json};
         let currentModalIdx = null;
 
-        const savedEdits = JSON.parse(localStorage.getItem("hattyu_edits_v5") || "{{}}");
+        // 保存された手動発注点および決定事項を復元
+        const savedEdits = JSON.parse(localStorage.getItem("hattyu_edits_v6") || "{{}}");
         tableData.forEach(r => {{
             if (savedEdits[r["品番"]]) {{
                 r["1課発注点"] = savedEdits[r["品番"]].p1 ?? r["1課発注点"];
@@ -820,12 +818,28 @@ with tab1:
                 r["発注日"] = savedEdits[r["品番"]].odate ?? r["発注日"];
                 r["発注検討フラグ"] = Number(r["入荷後のフリー在庫"] || 0) - (Number(r["1課発注点"] || 0) + Number(r["2課発注点"] || 0));
             }}
+            // 確保数ズレの計算: ロジ確保 - 弥生確保 - 丸藤確保
+            r["確保数のズレ"] = Number(r["確保数_ロジザード"] || 0) - Number(r["在庫確保_弥生"] || 0) - Number(r["在庫確保_丸藤"] || 0);
         }});
 
         function fmtNum(val) {{
             if (val === "" || val === null || val === undefined) return "";
             const n = Number(val);
             return isNaN(n) ? val : n.toLocaleString("ja-JP");
+        }}
+
+        function handleKeyDown(event, colName, currentRowIdx) {{
+            if (event.key === "Enter") {{
+                event.preventDefault();
+                const nextRowIdx = currentRowIdx + 1;
+                if (nextRowIdx < tableData.length) {{
+                    const nextInput = document.getElementById(`${{colName}}-${{nextRowIdx}}`);
+                    if (nextInput) {{
+                        nextInput.focus();
+                        if (nextInput.select) nextInput.select();
+                    }}
+                }}
+            }}
         }}
 
         function recalculateRow(idx) {{
@@ -858,6 +872,8 @@ with tab1:
                 const rateCls = (rateVal <= 5) ? "bg-pink-rate" : "bg-green";
                 const salesVal = Number(r["今月売れ数"] || 0);
                 const salesCls = (salesVal >= 1) ? "bg-sales-hit" : "";
+                const zureVal = Number(r["確保数のズレ"] || 0);
+                const zureCls = (zureVal !== 0) ? "bg-zure-diff" : "bg-cyan";
 
                 html += `<tr>
                     <td class="w-no sticky-col-1">${{r["No"]}}</td>
@@ -868,30 +884,30 @@ with tab1:
                     <td class="w-num bg-hist-ki">${{fmtNum(r["74期"])}}</td>
                     <td class="w-num bg-hist-ki">${{fmtNum(r["75期"])}}</td>
                     <td class="w-num bg-hist-ki">${{fmtNum(r["76期"])}}</td>
-                    <td class="w-num"><input type="number" class="cell-input-point" value="${{r["1課発注点"]}}" oninput="tableData[${{idx}}]['1課発注点']=Number(this.value); recalculateRow(${{idx}})"></td>
-                    <td class="w-num"><input type="number" class="cell-input-point" value="${{r["2課発注点"]}}" oninput="tableData[${{idx}}]['2課発注点']=Number(this.value); recalculateRow(${{idx}})"></td>
+                    <td class="w-num"><input type="number" class="cell-input-point" id="point1-${{idx}}" value="${{r["1課発注点"]}}" oninput="tableData[${{idx}}]['1課発注点']=Number(this.value); recalculateRow(${{idx}})" onkeydown="handleKeyDown(event, 'point1', ${{idx}})"></td>
+                    <td class="w-num"><input type="number" class="cell-input-point" id="point2-${{idx}}" value="${{r["2課発注点"]}}" oninput="tableData[${{idx}}]['2課発注点']=Number(this.value); recalculateRow(${{idx}})" onkeydown="handleKeyDown(event, 'point2', ${{idx}})"></td>
                     <td class="w-num bg-cyan">${{fmtNum(r["在庫数_ロジザード"])}}</td>
                     <td class="w-num bg-cyan">${{fmtNum(r["入荷予定数_ロジザード"])}}</td>
-                    <td class="w-date bg-cyan"><input type="text" class="cell-input" id="ndate-${{idx}}" value="${{r["入荷予定日_ロジザード"] || ""}}" oninput="updateCell(${{idx}}, '入荷予定日_ロジザード', this.value)"></td>
+                    <td class="w-date bg-cyan"><input type="text" class="cell-input" id="ndate-${{idx}}" value="${{r["入荷予定日_ロジザード"] || ""}}" oninput="updateCell(${{idx}}, '入荷予定日_ロジザード', this.value)" onkeydown="handleKeyDown(event, 'ndate', ${{idx}})"></td>
                     <td class="w-num bg-cyan">${{fmtNum(r["確保数_ロジザード"])}}</td>
                     <td class="w-num bg-cyan"><span class="click-link" onclick="openModal(${{idx}}, 'yayoi')">${{fmtNum(r["在庫確保_弥生"])}}</span></td>
                     <td class="w-num bg-cyan"><span class="click-link" style="color:#b91c1c;" onclick="openModal(${{idx}}, 'marufuji')">${{fmtNum(r["在庫確保_丸藤"])}}</span></td>
-                    <td class="w-num bg-cyan">${{fmtNum(r["確保数のズレ"])}}</td>
+                    <td class="w-num ${{zureCls}}" id="zure-${{idx}}">${{fmtNum(r["確保数のズレ"])}}</td>
                     <td class="w-num bg-cyan">${{fmtNum(r["入荷後のフリー在庫"])}}</td>
                     <td class="w-num ${{flagCls}}" id="flag-${{idx}}">${{fmtNum(r["発注検討フラグ"])}}</td>
                     <td class="w-num ${{salesCls}}">${{salesVal > 0 ? "🔥 " + fmtNum(salesVal) : "0"}}</td>
                     <td class="w-num ${{rateCls}}">${{fmtNum(r["在庫回転率"]) + "%"}}</td>
                     <td class="w-num">${{fmtNum(r["リンベル確保数"])}}</td>
                     <td class="w-prev-dec bg-yellow-ro" title="${{r["前回決定事項"] || ""}}">${{r["前回決定事項"] || ""}}</td>
-                    <td class="w-dec bg-yellow-edit"><input type="text" class="cell-input" id="dec-${{idx}}" value="${{r["決定事項"] || ""}}" oninput="updateCell(${{idx}}, '決定事項', this.value)"></td>
-                    <td class="w-date bg-yellow-edit"><input type="text" class="cell-input" id="odate-${{idx}}" value="${{r["発注日"] || ""}}" oninput="updateCell(${{idx}}, '発注日', this.value)"></td>
+                    <td class="w-dec bg-yellow-edit"><input type="text" class="cell-input" id="dec-${{idx}}" value="${{r["決定事項"] || ""}}" oninput="updateCell(${{idx}}, '決定事項', this.value)" onkeydown="handleKeyDown(event, 'dec', ${{idx}})"></td>
+                    <td class="w-date bg-yellow-edit"><input type="text" class="cell-input" id="odate-${{idx}}" value="${{r["発注日"] || ""}}" oninput="updateCell(${{idx}}, '発注日', this.value)" onkeydown="handleKeyDown(event, 'odate', ${{idx}})"></td>
                 </tr>`;
             }});
             tbody.innerHTML = html;
         }}
 
         function saveToStorage(hinban, rowObj) {{
-            const store = JSON.parse(localStorage.getItem("hattyu_edits_v5") || "{{}}");
+            const store = JSON.parse(localStorage.getItem("hattyu_edits_v6") || "{{}}");
             store[hinban] = {{
                 p1: rowObj["1課発注点"],
                 p2: rowObj["2課発注点"],
@@ -899,7 +915,7 @@ with tab1:
                 dec: rowObj["決定事項"],
                 odate: rowObj["発注日"]
             }};
-            localStorage.setItem("hattyu_edits_v5", JSON.stringify(store));
+            localStorage.setItem("hattyu_edits_v6", JSON.stringify(store));
         }}
 
         function updateCell(idx, field, val) {{
@@ -921,7 +937,7 @@ with tab1:
                 <div class="summary-item">ロジ在庫: <span>${{fmtNum(r["在庫数_ロジザード"])}}</span></div>
                 <div class="summary-item">弥生確保: <span>${{fmtNum(r["在庫確保_弥生"])}}</span></div>
                 <div class="summary-item">丸藤確保: <span style="color:#b91c1c;">${{fmtNum(r["在庫確保_丸藤"])}}</span></div>
-                <div class="summary-item">今月売れ数: <span style="color:#c2410c;">${{fmtNum(r["今月売れ数"])}}</span></div>
+                <div class="summary-item">確保数のズレ: <span style="color:#e11d48;">${{fmtNum(r["確保数のズレ"])}}</span></div>
                 <div class="summary-item">フリー在庫: <span>${{fmtNum(r["入荷後のフリー在庫"])}}</span></div>
                 <div class="summary-item">検討フラグ: <span style="color:#e11d48;">${{fmtNum(r["発注検討フラグ"])}}</span></div>
             `;
