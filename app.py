@@ -111,6 +111,7 @@ YAYOI_COMP_EXCEL = find_target_file(["弥生会社名", "会社名", "得意先"
 
 SAVE_CSV = os.path.join(SCRIPT_DIR, "meeting_decisions_v8.csv")
 MANUAL_YAYOI_CSV = os.path.join(SCRIPT_DIR, "yayoi_manual_additions.csv")
+CUSTOM_POINTS_JSON = os.path.join(SCRIPT_DIR, "custom_order_points.json")
 
 STAFF_OPTIONS_CLEAN = ["", "小泉", "鈴木", "松平", "原", "西山", "田中", "水原", "川村", "穴山"]
 
@@ -208,7 +209,7 @@ def load_excel_master(file_source):
         st.error(f"発注検討表の読み込みエラー: {e}")
         return pd.DataFrame(), pd.DataFrame(), "前回決定事項"
 
-    # ご指定の最新シート『マスター (新)』を最優先で探索
+    # 『マスター (新)』シートを最優先で探索
     target_df = None
     if "マスター (新)" in all_sheets:
         target_df = all_sheets["マスター (新)"]
@@ -384,11 +385,10 @@ def load_yayoi_data(file_source):
     return df
 
 @st.cache_data
-def load_sales_csvs(uploaded_files, valid_norm_codes_tuple, target_period="すべて"):
+def load_sales_csvs(uploaded_files, valid_norm_codes_tuple, target_period="76期"):
     """
-    G:\マイドライブ\売上ダッシュボード\済 やアップロードされた yayoi_*.csv から、
-    P列（index 15: 商品コード）とX列（index 23: 数量）を抽出し、
-    指定された「期」（73期〜77期、7月〜6月が1期）の期間でフィルタリングして合算する。
+    yayoi_*.csv からP列（商品コード）とX列（数量）を抽出し、
+    73期〜77期（7月〜6月が1期）でフィルタリングして合算する決定版パーサ。
     """
     valid_codes = set(valid_norm_codes_tuple)
     all_records = []
@@ -434,11 +434,9 @@ def load_sales_csvs(uploaded_files, valid_norm_codes_tuple, target_period="す�
             qty_val = 0.0
             date_str = ""
 
-            # 伝票日付は通常D列（index 3）
             if len(row_vals) > 3:
                 date_str = clean_str(row_vals[3])
 
-            # P列（index 15）の商品コードチェック
             if len(row_vals) > 15:
                 cv = normalize_code(row_vals[15])
                 if cv in valid_codes:
@@ -452,7 +450,6 @@ def load_sales_csvs(uploaded_files, valid_norm_codes_tuple, target_period="す�
                         break
 
             if code_val:
-                # X列（index 23）の数量チェック
                 if len(row_vals) > 23:
                     qv = to_num(row_vals[23])
                     if qv > 0:
@@ -478,12 +475,7 @@ def load_sales_csvs(uploaded_files, valid_norm_codes_tuple, target_period="す�
 
     df_rec = pd.DataFrame(all_records)
 
-    # 日付から「期」を判定 (7月〜6月が1期)
-    # 73期: 2022年7月1日 〜 2023年6月30日
-    # 74期: 2023年7月1日 〜 2024年6月30日
-    # 75期: 2024年7月1日 〜 2025年6月30日
-    # 76期: 2025年7月1日 〜 2026年6月30日
-    # 77期: 2026年7月1日 〜 2027年6月30日
+    # 期の判定 (7月〜6月が1期)
     def get_period(d_val):
         d_clean = "".join(filter(str.isdigit, str(d_val)))
         if len(d_clean) >= 8:
@@ -492,26 +484,24 @@ def load_sales_csvs(uploaded_files, valid_norm_codes_tuple, target_period="す�
                 if pd.notna(dt):
                     y = dt.year
                     m = dt.month
-                    # 7月以降なら y + 1 が期のベース、6月以前なら y が期のベース
-                    # 76期は 2025/7 〜 2026/6
                     if m >= 7:
                         base_y = y + 1
                     else:
                         base_y = y
-                    # 73期 = 2023年ベース (2022/7-2023/6) => base_y - 150? Let's map precisely:
-                    # 73期: 2022/7-2023/6 => base_y = 2023 -> 73
-                    # 74期: 2023/7-2024/6 => base_y = 2024 -> 74
-                    # 75期: 2024/7-2025/6 => base_y = 2025 -> 75
-                    # 76期: 2025/7-2026/6 => base_y = 2026 -> 76
-                    # 77期: 2026/7-2027/6 => base_y = 2027 -> 77
-                    return f"{base_y}期"
+                    # 73期: 2022/7-2023/6 => base_y=2023 -> 73
+                    # 74期: 2023/7-2024/6 => base_y=2024 -> 74
+                    # 75期: 2024/7-2025/6 => base_y=2025 -> 75
+                    # 76期: 2025/7-2026/6 => base_y=2026 -> 76
+                    # 77期: 2026/7-2027/6 => base_y=2027 -> 77
+                    diff = base_y - 2023
+                    period_num = 73 + diff
+                    return f"{period_num}期"
             except Exception:
                 pass
-        return "不明"
+        return "76期" # 日付不明のものは今期(76期)扱い
 
     df_rec["期"] = df_rec["date"].apply(get_period)
 
-    # フィルタリング
     df_filtered = df_rec.copy()
     if target_period != "すべて":
         df_filtered = df_filtered[df_filtered["期"] == target_period]
@@ -526,7 +516,7 @@ head_col1, head_col2 = st.columns([3.0, 2.2])
 with head_col1:
     st.markdown('<div class="app-header">📊 発注検討表 ＆ 弥生受注伝票システム（完全連動版）</div>', unsafe_allow_html=True)
 with head_col2:
-    with st.expander("📂 売上CSV（今月売れ数・期指定）＆ 最新Excelの読込・更新", expanded=False):
+    with st.expander("📂 売上CSV（期指定・売れ数）＆ 最新Excelの読込・更新", expanded=False):
         up_sales = st.file_uploader("🔥 売上CSV（ yayoi_*.csv をすべて選択してドロップ）", type=["csv"], accept_multiple_files=True, key="up_s")
         selected_period = st.selectbox("📅 表示する期を選択", ["すべて", "76期", "75期", "74期", "73期", "77期"], index=1)
         u_c1, u_c2 = st.columns(2)
@@ -555,7 +545,19 @@ if df_main.empty:
     st.error("⚠️ 『発注検討表.xlsx』が見つかりません。右上の「📂 売上CSV ＆ 最新Excelの読込・更新」から『発注検討表.xlsx』をアップロードしてください。")
     st.stop()
 
-# 商品コード → U列倉庫・商品名のマッピング辞書
+# 1課・2課発注点の手動変更データを適用
+if os.path.exists(CUSTOM_POINTS_JSON):
+    try:
+        with open(CUSTOM_POINTS_JSON, "r", encoding="utf-8") as pf:
+            custom_pts = json.load(pf)
+            for idx_m, r_m in df_main.iterrows():
+                h_val = clean_str(r_m["品番"])
+                if h_val in custom_pts:
+                    df_main.at[idx_m, "1課発注点"] = custom_pts[h_val].get("1課発注点", r_m["1課発注点"])
+                    df_main.at[idx_m, "2課発注点"] = custom_pts[h_val].get("2課発注点", r_m["2課発注点"])
+    except Exception:
+        pass
+
 item_wh_map = {}
 item_name_map = {}
 for it in master_items:
@@ -592,7 +594,7 @@ if not df_yayoi.empty:
         if clean_str(r.get("倉庫名", "")) in ("", "WEB入力", "弥生風入力") else clean_str(r["倉庫名"]),
         axis=1
     )
-    # 🔴 丸藤確保等の正確な集計（得意先名に「丸藤」が含まれる受注残数のみを集約）
+    # 丸藤確保等の正確な集計（得意先名に「丸藤」が含まれる受注残数のみ）
     marufuji_df = df_yayoi[(df_yayoi["受注残数"] > 0) & (df_yayoi["得意先名"].str.contains("丸藤", na=False))]
     marufuji_summary = marufuji_df.groupby("品番_正規化")["受注残数"].sum().reset_index().rename(columns={"受注残数": "丸藤実データ合計"})
 
@@ -657,7 +659,7 @@ st.caption(
 tab1, tab2, tab3, tab4 = st.tabs([
     f"📋 1. 発注検討表（全 {len(m_df):,} 件・特大ポップアップ）",
     "🏢 2. 会社（得意先）別・受注番号別 確保リスト（特大ポップアップ）",
-    "💻 3. 弥生受注伝票（コード・商品名・倉庫名 分離版 ／ 最大100行）",
+    "💻 3. 1課・2課発注点の変更 ＆ 受注伝票入力",
     "🕒 4. 入荷予定・会議履歴 ＆ 売上CSV検証"
 ])
 
@@ -1298,7 +1300,7 @@ with tab2:
         components.html(html_tab2, height=650, scrolling=False)
 
 # =========================================================
-# タブ3：弥生受注伝票（1課・2課発注点の手動変更対応版）
+# タブ3：1課・2課発注点の手動変更 ＆ 受注伝票入力
 # =========================================================
 with tab3:
     st.markdown('<div class="yayoi-slip-header">⚙️ 1課発注点・2課発注点の手動変更・管理</div>', unsafe_allow_html=True)
@@ -1323,17 +1325,16 @@ with tab3:
     )
 
     if st.button("💾 発注点の変更を保存する", type="primary"):
-        # 変更内容をローカルストレージまたはカスタムCSVに保存
         points_store = {}
         for _, r_p in edited_points_result.iterrows():
             points_store[clean_str(r_p["品番"])] = {
                 "1課発注点": int(to_num(r_p["1課発注点"])),
                 "2課発注点": clean_str(r_p["2課発注点"])
             }
-        with open(os.path.join(SCRIPT_DIR, "custom_order_points.json"), "w", encoding="utf-8") as pf:
+        with open(CUSTOM_POINTS_JSON, "w", encoding="utf-8") as pf:
             json.dump(points_store, pf, ensure_ascii=False)
         st.success("✅ 発注点の変更を保存しました！再読み込みして反映します。")
-        st.time.sleep(1)
+        time.sleep(1)
         st.rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
