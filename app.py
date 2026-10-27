@@ -6,7 +6,8 @@ import datetime
 import os
 import glob
 import json
-import random
+import zipfile
+import io
 import time
 
 st.set_page_config(page_title="発注検討表 ＆ 弥生受注管理システム", layout="wide")
@@ -163,19 +164,19 @@ def load_item_master(file_source):
 def load_excel_master(file_source):
     if file_source is None:
         return pd.DataFrame(), pd.DataFrame(), "前回決定事項"
+    target_df = None
     try:
         all_sheets = pd.read_excel(file_source, sheet_name=None, header=None)
+        target_df = list(all_sheets.values())[0]
     except Exception as e:
         try:
             wb = openpyxl.load_workbook(file_source, data_only=True, keep_vba=False)
             ws = wb[wb.sheetnames[0]]
             data = [[cell.value for cell in row] for row in ws.iter_rows()]
-            all_sheets = {wb.sheetnames[0]: pd.DataFrame(data)}
+            target_df = pd.DataFrame(data)
         except Exception as ex:
             st.error(f"発注検討表の読み込みエラー: {ex}")
             return pd.DataFrame(), pd.DataFrame(), "前回決定事項"
-
-    target_df = list(all_sheets.values())[0]
 
     header_idx = 0
     for idx in range(min(15, len(target_df))):
@@ -282,30 +283,7 @@ def load_excel_master(file_source):
         })
 
     df_main = pd.DataFrame(items)
-
-    hist_list = []
-    for s_name, df_s in all_sheets.items():
-        s_str = str(s_name).strip()
-        if s_str.isdigit() and len(s_str) == 5 and not df_s.empty:
-            h_row_vals = [clean_str(x) for x in df_s.iloc[0].values]
-            h_col_idx = next((i for i, c in enumerate(h_row_vals) if c == "品番"), 2)
-            k_cols = [i for i, c in enumerate(h_row_vals) if c and "決定事項" in c and "前回" not in c]
-            s_clean = s_str.lstrip("0")
-            rest = s_clean[1:] if s_clean.startswith("8") else s_clean
-            dt_str = f"2026-{rest[:2]}-{rest[2:]}" if len(rest) == 4 else (f"2026-0{rest[0]}-{rest[1:]}" if len(rest) == 3 else s_str)
-            for _, r_d in df_s.iloc[1:].iterrows():
-                r_vals = r_d.values
-                if len(r_vals) <= h_col_idx:
-                    continue
-                c_val = clean_str(r_vals[h_col_idx])
-                if not c_val:
-                    continue
-                for kc in k_cols:
-                    if kc < len(r_vals) and clean_str(r_vals[kc]) not in ("", "0"):
-                        hist_list.append({"会議日": dt_str, "シート": s_str, "品番": c_val, "決定事項": clean_str(r_vals[kc])})
-
-    df_hist = pd.DataFrame(hist_list).drop_duplicates(subset=["会議日", "品番", "決定事項"]) if hist_list else pd.DataFrame(columns=["会議日", "シート", "品番", "決定事項"])
-    return df_main, df_hist, prev_col_title
+    return df_main, pd.DataFrame(columns=["会議日", "シート", "品番", "決定事項"]), prev_col_title
 
 @st.cache_data
 def load_yayoi_data(file_source):
@@ -381,9 +359,28 @@ def load_yayoi_data(file_source):
     return df
 
 @st.cache_data
-def load_sales_csvs(uploaded_files, valid_norm_codes_tuple):
+def load_sales_csvs_universal(uploaded_files, valid_norm_codes_tuple):
     valid_codes = set(valid_norm_codes_tuple)
     all_records = []
+
+    # ZIPファイルがアップロードされている場合の展開処理
+    processed_files = []
+    if uploaded_files:
+        for f in uploaded_files:
+            fname = getattr(f, "name", "uploaded.csv")
+            if fname.lower().endswith(".zip"):
+                try:
+                    f.seek(0)
+                    with zipfile.ZipFile(io.BytesIO(f.read())) as z:
+                        for zname in z.namelist():
+                            if zname.lower().endswith(".csv") and not zname.startswith("__MACOSX") and not zname.startswith("._"):
+                                with z.open(zname) as zf:
+                                    processed_files.append((zname, io.BytesIO(zf.read())))
+                except Exception as ze:
+                    st.error(f"ZIP解凍エラー ({fname}): {ze}")
+            else:
+                f.seek(0)
+                processed_files.append((fname, f))
 
     local_csv_paths = []
     for d in SEARCH_DIRS:
@@ -393,14 +390,15 @@ def load_sales_csvs(uploaded_files, valid_norm_codes_tuple):
             local_csv_paths.extend(glob.glob(os.path.join(d, "*.csv")))
     local_csv_paths = sorted(list(set(local_csv_paths)))
 
-    sources = uploaded_files if uploaded_files else local_csv_paths
-    if not sources:
-        return pd.Series(dtype=int), 0, pd.DataFrame()
+    if not processed_files and not local_csv_paths:
+        return pd.Series(dtype=int), 0, pd.DataFrame(), {}
 
+    sources = processed_files if processed_files else [(os.path.basename(p), p) for p in local_csv_paths]
     loaded_file_count = 0
-    for f in sources:
+    period_buckets = {"今月（最新CSV）": {}}
+
+    for fname, f in sources:
         df_s = None
-        fname = f if isinstance(f, str) else getattr(f, "name", "uploaded.csv")
         for enc in ["cp932", "shift_jis", "utf-8-sig", "utf-8"]:
             try:
                 if isinstance(f, str):
@@ -417,7 +415,6 @@ def load_sales_csvs(uploaded_files, valid_norm_codes_tuple):
             continue
 
         loaded_file_count += 1
-
         code_col = 15
         qty_col = 23
         start_row = 0
@@ -430,6 +427,7 @@ def load_sales_csvs(uploaded_files, valid_norm_codes_tuple):
                     qty_col = row_str.index("数量")
                 break
 
+        file_records = []
         for r_i in range(start_row, len(df_s)):
             row_vals = df_s.iloc[r_i].values
             if len(row_vals) <= max(code_col, qty_col):
@@ -441,18 +439,26 @@ def load_sales_csvs(uploaded_files, valid_norm_codes_tuple):
                 if q_val > 0:
                     d_val = clean_str(row_vals[3]) if len(row_vals) > 3 else ""
                     all_records.append({
-                        "file": os.path.basename(fname),
+                        "file": fname,
                         "date": d_val,
                         "code_norm": c_val,
                         "qty": q_val
                     })
+                    file_records.append({"code_norm": c_val, "qty": q_val})
+
+        if file_records:
+            df_fr = pd.DataFrame(file_records)
+            f_summary = df_fr.groupby("code_norm")["qty"].sum().round().astype(int).to_dict()
+            period_buckets[fname] = f_summary
 
     if not all_records:
-        return pd.Series(dtype=int), loaded_file_count, pd.DataFrame()
+        return pd.Series(dtype=int), 0, pd.DataFrame(), {}
 
     df_rec = pd.DataFrame(all_records)
     summary_series = df_rec.groupby("code_norm")["qty"].sum().round().astype(int)
-    return summary_series, loaded_file_count, df_rec
+    period_buckets["全期間合算（合計）"] = summary_series.to_dict()
+
+    return summary_series, loaded_file_count, df_rec, period_buckets
 
 # ---------------------------------------------------------
 # ヘッダー ＆ アップローダー
@@ -461,8 +467,8 @@ head_col1, head_col2 = st.columns([3.2, 2.0])
 with head_col1:
     st.markdown('<div class="app-header">📊 発注検討表 ＆ 弥生受注管理システム（完全連動版）</div>', unsafe_allow_html=True)
 with head_col2:
-    with st.expander("📂 売上CSV（今月売れ数）＆ 最新Excelの読込・更新", expanded=False):
-        up_sales = st.file_uploader("🔥 売上CSV（ yayoi_*.csv をすべて選択してドロップ）", type=["csv"], accept_multiple_files=True, key="up_s")
+    with st.expander("📂 売上CSV・ZIP ＆ 最新Excelの読込・更新", expanded=False):
+        up_sales = st.file_uploader("🔥 売上CSV または ZIPファイル（複数選択・ZIP一括ドロップ対応）", type=["csv", "zip"], accept_multiple_files=True, key="up_s")
         u_c1, u_c2 = st.columns(2)
         up_main = u_c1.file_uploader("📋 発注検討表.xlsx", type=["xlsx"], key="up_m")
         up_yayoi = u_c2.file_uploader("📑 弥生確保リスト.xlsx", type=["xlsx"], key="up_y")
@@ -484,14 +490,13 @@ master_comps = load_company_master(comp_src)
 master_items = load_item_master(item_src)
 
 if df_main.empty:
-    st.error("⚠️ 『発注検討表.xlsx』が見つかりません。右上の「📂 売上CSV ＆ 最新Excelの読込・更新」から『発注検討表.xlsx』をアップロードしてください。")
+    st.error("⚠️ 『発注検討表.xlsx』が見つかりません。右上のエクスパンダーから『発注検討表.xlsx』をアップロードしてください。")
     st.stop()
 
 marufuji_dict = {}
 yayoi_dict = {}
 if not df_yayoi.empty:
     df_yayoi["品番_正規化"] = df_yayoi["商品コード"].apply(normalize_code)
-    
     yayoi_real_totals = df_yayoi.groupby("品番_正規化")["数量"].sum().to_dict()
     
     def is_marufuji_name(name):
@@ -508,7 +513,6 @@ if not df_yayoi.empty:
     for code_n, grp in df_yayoi.groupby("品番_正規化", sort=False):
         grp_sorted = grp.sort_values(by=["受注日_dt", "納入期日_dt"], ascending=[False, False], na_position="last")
         yayoi_dict[code_n] = grp_sorted[["受注番号", "得意先名", "数量", "受注日", "納入期日", "倉庫名", "備考", "担当者名"]].to_dict(orient="records")
-        
         maru_grp = grp_sorted[grp_sorted["得意先名"].apply(is_marufuji_name)]
         if not maru_grp.empty:
             marufuji_dict[code_n] = maru_grp[["受注番号", "得意先名", "数量", "受注日", "納入期日", "倉庫名", "備考", "担当者名"]].to_dict(orient="records")
@@ -536,34 +540,26 @@ for _, r in df_main.iterrows():
         item_name_map[ic] = clean_str(r["商品区分"])
 
 all_valid_norm_codes = tuple(set(df_main["品番_正規化"].unique()) | set(item_name_map.keys()))
-sales_series, sales_file_cnt, df_sales_detail = load_sales_csvs(up_sales, all_valid_norm_codes)
-if not sales_series.empty:
-    df_main["今月売れ数"] = df_main["品番_正規化"].map(sales_series).fillna(0).astype(int)
+sales_series, sales_file_cnt, df_sales_detail, period_buckets = load_sales_csvs_universal(up_sales, all_valid_norm_codes)
+
+# 過去期・期間の切り替えセレクター
+period_options = list(period_buckets.keys()) if period_buckets else ["全期間合算（合計）"]
+sel_period = st.selectbox("📅 表示する売上期間・CSVファイルの切り替え（過去の期や月別も選択可）", period_options, index=0)
+
+active_sales_dict = period_buckets.get(sel_period, {}) if period_buckets else {}
+if active_sales_dict:
+    df_main["今月売れ数"] = df_main["品番_正規化"].map(active_sales_dict).fillna(0).astype(int)
 else:
     df_main["今月売れ数"] = 0
-
-hist_dict = {} if 'df_hist' in locals() and df_hist is not None and not df_hist.empty else {}
-
-if os.path.exists(SAVE_CSV):
-    try:
-        df_saved = pd.read_csv(SAVE_CSV).fillna("")
-        for _, s_row in df_saved.iterrows():
-            c = clean_str(s_row["品番"])
-            if c in df_main["品番"].values:
-                df_main.loc[df_main["品番"] == c, "入荷予定日_ロジザード"] = clean_str(s_row.get("入荷予定日_ロジザード", ""))
-                df_main.loc[df_main["品番"] == c, "決定事項"] = clean_str(s_row.get("決定事項", ""))
-                df_main.loc[df_main["品番"] == c, "発注日"] = clean_str(s_row.get("発注日", ""))
-    except Exception:
-        pass
 
 m_df = df_main.copy()
 
 total_sales_qty = int(m_df["今月売れ数"].sum())
-asc001_qty = int(sales_series.get("ASC-001", 0)) if not sales_series.empty else 0
+asc001_qty = int(active_sales_dict.get("ASC-001", 0)) if active_sales_dict else 0
 st.caption(
     f"✅ **最新データ完全連動中** ｜ 発注検討表: **{len(m_df):,}** 商品 ｜ "
     f"得意先マスタ: **{len(master_comps):,}** 社 ｜ "
-    f"🔥 今月売れ数合計: **{total_sales_qty:,}** 個 （読込CSV: {sales_file_cnt} 件 ／ ASC-001集計値: **{asc001_qty:,}** 個）"
+    f"🔥 選択期間の売れ数合計: **{total_sales_qty:,}** 個 （読込ファイル: {sales_file_cnt} 件 ／ ASC-001: **{asc001_qty:,}** 個）"
 )
 
 tab1, tab2, tab3, tab4 = st.tabs([
