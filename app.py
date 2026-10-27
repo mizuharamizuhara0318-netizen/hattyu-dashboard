@@ -33,6 +33,23 @@ st.markdown("""
         padding-bottom: 4px;
         border-bottom: 3px solid #2563eb;
     }
+    .yayoi-slip-header {
+        background-color: #2e6b5e;
+        color: white;
+        padding: 8px 14px;
+        font-weight: bold;
+        font-size: 15px;
+        border-radius: 6px 6px 0 0;
+        margin-top: 6px;
+    }
+    .yayoi-slip-body {
+        background-color: #f2f7f5;
+        border: 2px solid #2e6b5e;
+        border-top: none;
+        border-radius: 0 0 6px 6px;
+        padding: 14px;
+        margin-bottom: 14px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -264,7 +281,7 @@ def load_excel_master(file_source):
             "確保数_ロジザード": sec_roji,
             "在庫確保_弥生": 0,
             "在庫確保_丸藤": 0,
-            "確保数のズレ": sec_roji,  # 確保数ロジザード - 在庫確保弥生 - 在庫確保丸藤
+            "確保数のズレ": sec_roji,
             "入荷後のフリー在庫": free_val,
             "発注検討フラグ": flag_val,
             "在庫回転率": rate_val,
@@ -487,10 +504,8 @@ yayoi_dict = {}
 if not df_yayoi.empty:
     df_yayoi["品番_正規化"] = df_yayoi["商品コード"].apply(normalize_code)
     
-    # 1. 弥生全体合計 (N列コードごとのV列数量合計)
     yayoi_real_totals = df_yayoi.groupby("品番_正規化")["数量"].sum().to_dict()
     
-    # 2. 丸藤限定合計 (F列が指定3社に合致するV列数量合計)
     def is_marufuji_name(name):
         n_clean = str(name).strip().replace(" ", " ")
         return any(target.replace(" ", " ") in n_clean for target in MARUFUJI_TARGET_NAMES)
@@ -498,14 +513,12 @@ if not df_yayoi.empty:
     df_maru_only = df_yayoi[df_yayoi["得意先名"].apply(is_marufuji_name)]
     marufuji_real_totals = df_maru_only.groupby("品番_正規化")["数量"].sum().to_dict()
 
-    # リストにない商品は確実に0にする
     df_main["在庫確保_弥生"] = df_main["品番_正規化"].map(yayoi_real_totals).fillna(0).astype(int)
     df_main["在庫確保_丸藤"] = df_main["品番_正規化"].map(marufuji_real_totals).fillna(0).astype(int)
 
     # 確保数のズレ = 確保数ロジザード - 在庫確保弥生 - 在庫確保丸藤
     df_main["確保数のズレ"] = df_main["確保数_ロジザード"] - df_main["在庫確保_弥生"] - df_main["在庫確保_丸藤"]
 
-    # ポップアップ用の辞書作成
     for code_n, grp in df_yayoi.groupby("品番_正規化", sort=False):
         grp_sorted = grp.sort_values(by=["受注日_dt", "納入期日_dt"], ascending=[False, False], na_position="last")
         yayoi_dict[code_n] = grp_sorted[["受注番号", "得意先名", "数量", "受注日", "納入期日", "倉庫名", "備考", "担当者名"]].to_dict(orient="records")
@@ -576,7 +589,7 @@ st.caption(
 tab1, tab2, tab3, tab4 = st.tabs([
     f"📋 1. 発注検討表（発注点リアルタイム連動版）",
     "🏢 2. 会社（得意先）別・受注番号別 確保リスト（特大ポップアップ）",
-    "💻 3. 弥生受注伝票（コード・商品名・倉庫名 分離版 ／ 最大100行）",
+    "💻 3. 弥生受注伝票（入力・登録・内容確認）",
     "🕒 4. 入荷予定・会議履歴 ＆ 売上CSV検証"
 ])
 
@@ -677,7 +690,7 @@ with tab1:
         .w-dec {{ width: 220px; min-width: 220px; }}
 
         .bg-cyan {{ background-color: #67e8f9 !important; }}
-        .bg-flag-neg {{ background-color: #fecdd3 !important; color: #be123c; font-weight: bold; }}
+        .bg-flag-neg {{ background-color: #fecdd3 !important; color: #be123c !important; font-weight: bold; }}
         .bg-green {{ background-color: #a3e635 !important; }}
         .bg-pink-rate {{ background-color: #fbcfe8 !important; color: #be123c; font-weight: bold; }}
         .bg-yellow-ro {{ background-color: #fef08a !important; color: #1e293b; }}
@@ -807,7 +820,6 @@ with tab1:
         const histMap = {hist_json};
         let currentModalIdx = null;
 
-        // 保存された手動発注点および決定事項を復元
         const savedEdits = JSON.parse(localStorage.getItem("hattyu_edits_v6") || "{{}}");
         tableData.forEach(r => {{
             if (savedEdits[r["品番"]]) {{
@@ -818,7 +830,6 @@ with tab1:
                 r["発注日"] = savedEdits[r["品番"]].odate ?? r["発注日"];
                 r["発注検討フラグ"] = Number(r["入荷後のフリー在庫"] || 0) - (Number(r["1課発注点"] || 0) + Number(r["2課発注点"] || 0));
             }}
-            // 確保数ズレの計算: ロジ確保 - 弥生確保 - 丸藤確保
             r["確保数のズレ"] = Number(r["確保数_ロジザード"] || 0) - Number(r["在庫確保_弥生"] || 0) - Number(r["在庫確保_丸藤"] || 0);
         }});
 
@@ -1281,7 +1292,7 @@ with tab2:
         components.html(html_tab2, height=650, scrolling=False)
 
 # =========================================================
-# タブ3：弥生受注伝票（コード・商品名・倉庫名 分離版 ／ 最大100行）
+# タブ3：弥生受注伝票（入力・登録・内容確認 ＆ 検索呼び出し）
 # =========================================================
 with tab3:
     max_seq = 0
@@ -1320,12 +1331,119 @@ with tab3:
     slip_state = st.session_state["slip_editor_state"]
     v_key = slip_state.get("version", 1)
 
-    top_b1, top_b2 = st.columns([1.8, 2.5])
-    if top_b1.button("📄 新規作成（すべて白紙にリセット）", use_container_width=True):
+    # 🔍 登録済み伝票の検索・編集画面への呼び出しモーダル
+    @st.dialog("🔍 登録済み伝票を検索・呼び出し", width="large")
+    def open_yayoi_search_modal():
+        st.caption("💡 登録されている伝票を受注番号ごとに一覧表示しています。行を選択して「編集画面に開く」を押すと入力フォームに呼び出せます。")
+        kw_modal = st.text_input("🔍 受注番号・得意先名・商品コードで検索", placeholder="例: 00002720 / 友和 / 丸藤")
+
+        df_search_src = df_yayoi.copy()
+        if kw_modal:
+            df_search_src = df_search_src[
+                df_search_src["受注番号"].astype(str).str.contains(kw_modal, case=False, na=False) |
+                df_search_src["得意先名"].str.contains(kw_modal, case=False, na=False) |
+                df_search_src["商品コード"].str.contains(kw_modal, case=False, na=False)
+            ]
+
+        if df_search_src.empty:
+            st.info("該当する伝票がありません。")
+            return
+
+        modal_summary = df_search_src.groupby("受注番号", as_index=False).agg(
+            受注日=("受注日", "first"),
+            納入期日=("納入期日", "first"),
+            得意先名=("得意先名", "first"),
+            担当者名=("担当者名", "first"),
+            明細数=("商品コード", "count"),
+            合計数量=("数量", "sum"),
+            備考=("備考", "first")
+        ).sort_values(by=["受注日", "受注番号"], ascending=[False, False]).reset_index(drop=True)
+
+        ev = st.dataframe(
+            modal_summary[["受注日", "受注番号", "得意先名", "担当者名", "明細数", "合計数量", "納入期日", "備考"]],
+            hide_index=True,
+            use_container_width=True,
+            height=240,
+            selection_mode="single-row",
+            on_select="rerun"
+        )
+
+        s_rows = ev.get("selection", {}).get("rows", [])
+        target_idx = s_rows[0] if s_rows else 0
+        target_ono = modal_summary.iloc[target_idx]["受注番号"]
+        target_lines = df_yayoi[df_yayoi["受注番号"].astype(str) == str(target_ono)]
+
+        st.markdown(
+            f"""
+            <div style="background:#eff6ff; border-left:5px solid #2563eb; padding:8px 12px; border-radius:4px; margin:6px 0;">
+                <b>📦 選択中の伝票明細</b> ｜ 受注番号: <b>{target_ono}</b> ／ 得意先: <b>{modal_summary.iloc[target_idx]['得意先名']}</b>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+        st.dataframe(
+            target_lines[["商品コード", "商品名/摘要", "倉庫名", "数量", "納入期日", "備考"]],
+            hide_index=True,
+            use_container_width=True,
+            height=160
+        )
+
+        if st.button("📂 この伝票を入力フォームに開く（内容確認・修正・削除）", type="primary", use_container_width=True):
+            first_r = target_lines.iloc[0]
+            grid_rows = []
+            for _, lr in target_lines.iterrows():
+                c_code = clean_str(lr["商品コード"])
+                if c_code and c_code not in item_code_list:
+                    item_code_list.append(c_code)
+                p_name = item_name_map.get(normalize_code(c_code), clean_str(lr.get("商品名/摘要", "")))
+                u_wh = item_wh_map.get(normalize_code(c_code), clean_str(lr.get("倉庫名", "")))
+                grid_rows.append({
+                    "商品コード": c_code,
+                    "商品名": p_name,
+                    "倉庫名": u_wh,
+                    "受注残数(数量)": int(lr["数量"]),
+                    "備考": clean_str(lr.get("備考", ""))
+                })
+            while len(grid_rows) < 10:
+                grid_rows.append({"商品コード": "", "商品名": "", "倉庫名": "", "受注残数(数量)": 0, "備考": ""})
+
+            matched_comp = next((c for c in comp_select_list if c and c.startswith(clean_str(first_r["得意先名"]))), clean_str(first_r["得意先名"]))
+            try:
+                od_dt = pd.to_datetime(first_r["受注日"]).date()
+            except Exception:
+                od_dt = datetime.date.today()
+            try:
+                dd_dt = pd.to_datetime(first_r["納入期日"]).date()
+            except Exception:
+                dd_dt = datetime.date.today()
+
+            st_name = clean_str(first_r.get("担当者名", ""))
+            for clean_st in STAFF_OPTIONS_CLEAN:
+                if clean_st and clean_st == st_name:
+                    st_name = clean_st
+                    break
+
+            st.session_state["slip_editor_state"] = {
+                "order_no": str(target_ono),
+                "order_date": od_dt,
+                "delivery_date": dd_dt,
+                "comp_label": matched_comp,
+                "staff": st_name,
+                "summary": clean_str(first_r.get("備考", "")),
+                "version": int(time.time() * 1000) % 1000000,
+                "grid_df": pd.DataFrame(grid_rows[:100])
+            }
+            st.rerun()
+
+    top_b1, top_b2, top_b3 = st.columns([1.8, 2.4, 2.0])
+    if top_b1.button("📄 新規作成（白紙リセット）", use_container_width=True):
         st.session_state["slip_editor_state"] = create_blank_slip(next_order_no_str)
         st.rerun()
 
-    if top_b2.button("➕ 入力行を10行追加（最大100行）", use_container_width=True):
+    if top_b2.button("🔍 登録済み伝票を検索・呼び出し", type="primary", use_container_width=True):
+        open_yayoi_search_modal()
+
+    if top_b3.button("➕ 入力行を10行追加", use_container_width=True):
         cur_df = slip_state["grid_df"]
         if len(cur_df) < 100:
             add_cnt = min(10, 100 - len(cur_df))
@@ -1376,7 +1494,7 @@ with tab3:
         slip_state["grid_df"],
         num_rows="dynamic",
         use_container_width=True,
-        height=350,
+        height=320,
         key=f"yayoi_grid_{v_key}",
         column_config={
             "商品コード": st.column_config.SelectboxColumn(
@@ -1503,6 +1621,27 @@ with tab3:
             st.session_state["slip_editor_state"] = create_blank_slip(next_order_no_str)
             st.success(f"🗑️ 受注番号『{in_ono}』を削除しました。")
             st.rerun()
+
+    # 📋 登録済み伝票の常時確認エリア（画面下部）
+    st.markdown("---")
+    st.subheader("📋 登録済み伝票一覧（手入力保存分 ＆ 確保データ）")
+    if os.path.exists(MANUAL_YAYOI_CSV):
+        try:
+            df_registered = pd.read_csv(MANUAL_YAYOI_CSV).fillna("")
+            if not df_registered.empty:
+                st.caption(f"💾 システム内で登録・保存された伝票（全 {df_registered['受注番号'].nunique()} 件）")
+                st.dataframe(
+                    df_registered[["受注日", "受注番号", "得意先名", "商品コード", "商品名/摘要", "数量", "倉庫名", "担当者名", "納入期日", "備考"]],
+                    hide_index=True,
+                    use_container_width=True,
+                    height=260
+                )
+            else:
+                st.info("手入力で新しく登録された伝票はまだありません。上のフォームから登録できます。")
+        except Exception:
+            st.info("登録済み伝票の読み込み待機中...")
+    else:
+        st.info("手入力で新しく登録された伝票はまだありません。上のフォームから登録できます。")
 
 # =========================================================
 # タブ4：入荷予定・会議履歴 ＆ 売上CSV検証
