@@ -34,6 +34,13 @@ st.markdown("""
         padding-bottom: 4px;
         border-bottom: 3px solid #2563eb;
     }
+    .filter-box {
+        background: #f8fafc;
+        border: 1px solid #cbd5e1;
+        padding: 12px 16px;
+        border-radius: 8px;
+        margin-bottom: 14px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -383,9 +390,8 @@ def load_yayoi_data(file_source):
         df = df.sort_values(by=["受注日_dt", "納入期日_dt"], ascending=[False, False], na_position="last")
     return df
 
-@st.cache_data
-def load_sales_csvs_universal(uploaded_files, valid_norm_codes_tuple):
-    valid_codes = set(valid_norm_codes_tuple)
+def parse_sales_files_to_records(uploaded_files, valid_norm_codes):
+    valid_codes = set(valid_norm_codes)
     all_records = []
 
     processed_files = []
@@ -409,17 +415,19 @@ def load_sales_csvs_universal(uploaded_files, valid_norm_codes_tuple):
     local_csv_paths = []
     for d in SEARCH_DIRS:
         if os.path.exists(d):
-            local_csv_paths.extend(glob.glob(os.path.join(d, "yayoi_*.csv")))
-            local_csv_paths.extend(glob.glob(os.path.join(d, "*yayoi*.csv")))
-            local_csv_paths.extend(glob.glob(os.path.join(d, "*.csv")))
+            try:
+                local_csv_paths.extend(glob.glob(os.path.join(d, "yayoi_*.csv")))
+                local_csv_paths.extend(glob.glob(os.path.join(d, "*yayoi*.csv")))
+                local_csv_paths.extend(glob.glob(os.path.join(d, "*.csv")))
+            except Exception:
+                pass
     local_csv_paths = sorted(list(set(local_csv_paths)))
 
     if not processed_files and not local_csv_paths:
-        return pd.Series(dtype=int), 0, pd.DataFrame(), {}
+        return 0, pd.DataFrame()
 
     sources = processed_files if processed_files else [(os.path.basename(p), p) for p in local_csv_paths]
     loaded_file_count = 0
-    period_buckets = {"今月（最新CSV）": {}}
 
     for fname, f in sources:
         df_s = None
@@ -451,7 +459,6 @@ def load_sales_csvs_universal(uploaded_files, valid_norm_codes_tuple):
                     qty_col = row_str.index("数量")
                 break
 
-        file_records = []
         for r_i in range(start_row, len(df_s)):
             row_vals = df_s.iloc[r_i].values
             if len(row_vals) <= max(code_col, qty_col):
@@ -461,28 +468,21 @@ def load_sales_csvs_universal(uploaded_files, valid_norm_codes_tuple):
             if c_val in valid_codes:
                 q_val = to_num(row_vals[qty_col])
                 if q_val > 0:
-                    d_val = clean_str(row_vals[3]) if len(row_vals) > 3 else ""
+                    d_str = clean_str(row_vals[3]) if len(row_vals) > 3 else ""
+                    # Parse date YYYYMMDD
+                    dt_val = pd.to_datetime(d_str, format="%Y%m%d", errors="coerce")
                     all_records.append({
                         "file": fname,
-                        "date": d_val,
+                        "date_str": d_str,
+                        "date_dt": dt_val,
                         "code_norm": c_val,
                         "qty": q_val
                     })
-                    file_records.append({"code_norm": c_val, "qty": q_val})
-
-        if file_records:
-            df_fr = pd.DataFrame(file_records)
-            f_summary = df_fr.groupby("code_norm")["qty"].sum().round().astype(int).to_dict()
-            period_buckets[fname] = f_summary
 
     if not all_records:
-        return pd.Series(dtype=int), 0, pd.DataFrame(), {}
+        return loaded_file_count, pd.DataFrame(columns=["file", "date_str", "date_dt", "code_norm", "qty"])
 
-    df_rec = pd.DataFrame(all_records)
-    summary_series = df_rec.groupby("code_norm")["qty"].sum().round().astype(int)
-    period_buckets["全期間合算（合計）"] = summary_series.to_dict()
-
-    return summary_series, loaded_file_count, df_rec, period_buckets
+    return loaded_file_count, pd.DataFrame(all_records)
 
 # ---------------------------------------------------------
 # ヘッダー ＆ アップローダー（session_state保持でリセット防止）
@@ -578,13 +578,79 @@ for _, r in df_main.iterrows():
         item_name_map[ic] = clean_str(r["商品区分"])
 
 all_valid_norm_codes = tuple(set(df_main["品番_正規化"].unique()) | set(item_name_map.keys()))
-sales_series, sales_file_cnt, df_sales_detail, period_buckets = load_sales_csvs_universal(up_sales, all_valid_norm_codes)
+sales_file_cnt, df_sales_all = parse_sales_files_to_records(up_sales, all_valid_norm_codes)
 
-# 過去期・期間の切り替えセレクター
-period_options = list(period_buckets.keys()) if period_buckets else ["全期間合算（合計）"]
-sel_period = st.selectbox("📅 表示する売上期間・CSVファイルの切り替え（過去の期や月別も選択可）", period_options, index=0)
+# ---------------------------------------------------------
+# 期間ショートカット ＆ フィルタUI（画像準拠）
+# ---------------------------------------------------------
+st.markdown('<div class="filter-box">', unsafe_allow_html=True)
+sc_col1, sc_col2 = st.columns([1.2, 4.0])
+sc_col1.markdown("#### 📅 期間ショートカット")
+shortcut_mode = sc_col2.radio(
+    "期間選択",
+    ["当月", "前月", "当期累計（7月〜6月）", "前期累計（7月〜6月）", "全データ累計", "手動指定"],
+    horizontal=True,
+    label_visibility="collapsed"
+)
 
-active_sales_dict = period_buckets.get(sel_period, {}) if period_buckets else {}
+# 基準日（データ内の最大日付、または本日の日付）
+if not df_sales_all.empty and df_sales_all["date_dt"].notna().any():
+    max_dt = df_sales_all["date_dt"].max()
+else:
+    max_dt = pd.Timestamp.now()
+
+start_dt = pd.NaT
+end_dt = pd.NaT
+
+if shortcut_mode == "当月":
+    start_dt = pd.Timestamp(max_dt.year, max_dt.month, 1)
+    end_dt = pd.Timestamp(max_dt.year, max_dt.month, max_dt.days_in_month)
+elif shortcut_mode == "前月":
+    first_this_month = pd.Timestamp(max_dt.year, max_dt.month, 1)
+    end_dt = first_this_month - pd.Timedelta(days=1)
+    start_dt = pd.Timestamp(end_dt.year, end_dt.month, 1)
+elif shortcut_mode == "当期累計（7月〜6月）":
+    # 7月始まり（7月〜翌年6月）
+    if max_dt.month >= 7:
+        fy_start_year = max_dt.year
+    else:
+        fy_start_year = max_dt.year - 1
+    start_dt = pd.Timestamp(fy_start_year, 7, 1)
+    end_dt = max_dt
+elif shortcut_mode == "前期累計（7月〜6月）":
+    if max_dt.month >= 7:
+        fy_start_year = max_dt.year - 1
+    else:
+        fy_start_year = max_dt.year - 2
+    start_dt = pd.Timestamp(fy_start_year, 7, 1)
+    end_dt = pd.Timestamp(fy_start_year + 1, 6, 30)
+elif shortcut_mode == "全データ累計":
+    start_dt = pd.Timestamp("2000-01-01")
+    end_dt = pd.Timestamp("2100-12-31")
+elif shortcut_mode == "手動指定":
+    m_col1, m_col2 = st.columns(2)
+    # デフォルトを当月に設定
+    def_start = pd.Timestamp(max_dt.year, max_dt.month, 1).date()
+    def_end = max_dt.date()
+    s_date_input = m_col1.date_input("開始日", value=def_start)
+    e_date_input = m_col2.date_input("終了日", value=def_end)
+    start_dt = pd.Timestamp(s_date_input)
+    end_dt = pd.Timestamp(e_date_input)
+
+st.markdown('</div>', unsafe_allow_html=True)
+
+# データのフィルタリング
+if not df_sales_all.empty and "date_dt" in df_sales_all.columns:
+    mask = (df_sales_all["date_dt"] >= start_dt) & (df_sales_all["date_dt"] <= end_dt)
+    df_sales_filtered = df_sales_all[mask].copy()
+else:
+    df_sales_filtered = pd.DataFrame(columns=["file", "date_str", "date_dt", "code_norm", "qty"])
+
+if not df_sales_filtered.empty:
+    active_sales_dict = df_sales_filtered.groupby("code_norm")["qty"].sum().round().astype(int).to_dict()
+else:
+    active_sales_dict = {}
+
 if active_sales_dict:
     df_main["今月売れ数"] = df_main["品番_正規化"].map(active_sales_dict).fillna(0).astype(int)
 else:
@@ -598,7 +664,7 @@ asc001_qty = int(active_sales_dict.get("ASC-001", 0)) if active_sales_dict else 
 st.caption(
     f"✅ **最新データ完全連動中** ｜ 発注検討表: **{len(m_df):,}** 商品 ｜ "
     f"得意先マスタ: **{len(master_comps):,}** 社 ｜ "
-    f"🔥 選択期間の売れ数合計: **{total_sales_qty:,}** 個 （読込ファイル: {sales_file_cnt} 件 ／ ASC-001: **{asc001_qty:,}** 個）"
+    f"🔥 【{shortcut_mode}】売れ数合計: **{total_sales_qty:,}** 個 （読込ファイル: {sales_file_cnt} 件 ／ ASC-001: **{asc001_qty:,}** 個）"
 )
 
 tab1, tab2, tab3, tab4 = st.tabs([
@@ -910,7 +976,7 @@ with tab1:
                     <td class="w-num"><input type="number" class="cell-input-point" id="point2-${{idx}}" value="${{r["2課発注点"]}}" oninput="tableData[${{idx}}]['2課発注点']=Number(this.value); recalculateRow(${{idx}})" onkeydown="handleKeyDown(event, 'point2', ${{idx}})"></td>
                     <td class="w-num bg-cyan">${{fmtNum(r["在庫数_ロジザード"])}}</td>
                     <td class="w-num bg-cyan">${{fmtNum(r["入荷予定数_ロジザード"])}}</td>
-                    <td class="w-date bg-cyan"><input type="text" class="cell-input" id="ndate-${{idx}}" value="${{r["入荷予定日_ロジザード"] || ""}}" oninput="updateCell(${{idx}}, '入荷予定日_ロジザード", this.value)" onkeydown="handleKeyDown(event, 'ndate', ${{idx}})"></td>
+                    <td class="w-date bg-cyan"><input type="text" class="cell-input" id="ndate-${{idx}}" value="${{r["入荷予定日_ロジザード"] || ""}}" oninput="updateCell(${{idx}}, '入荷予定日_ロジザード', this.value)" onkeydown="handleKeyDown(event, 'ndate', ${{idx}})"></td>
                     <td class="w-num bg-cyan">${{fmtNum(r["確保数_ロジザード"])}}</td>
                     <td class="w-num bg-cyan"><span class="click-link" onclick="openModal(${{idx}}, 'yayoi')">${{fmtNum(r["在庫確保_弥生"])}}</span></td>
                     <td class="w-num bg-cyan"><span class="click-link" style="color:#b91c1c;" onclick="openModal(${{idx}}, 'marufuji')">${{fmtNum(r["在庫確保_丸藤"])}}</span></td>
@@ -921,7 +987,7 @@ with tab1:
                     <td class="w-num ${{rateCls}}">${{fmtNum(r["在庫回転率"]) + "%"}}</td>
                     <td class="w-num">${{fmtNum(r["リンベル確保数"])}}</td>
                     <td class="w-prev-dec bg-yellow-ro" title="${{r["前回決定事項"] || ""}}">${{r["前回決定事項"] || ""}}</td>
-                    <td class="w-dec bg-yellow-edit"><input type="text" class="cell-input" id="dec-${{idx}}" value="${{r["決定事項"] || ""}}" oninput="updateCell(${{idx}}, '決定事項", this.value)" onkeydown="handleKeyDown(event, 'dec', ${{idx}})"></td>
+                    <td class="w-dec bg-yellow-edit"><input type="text" class="cell-input" id="dec-${{idx}}" value="${{r["決定事項"] || ""}}" oninput="updateCell(${{idx}}, '決定事項', this.value)" onkeydown="handleKeyDown(event, 'dec', ${{idx}})"></td>
                     <td class="w-date bg-yellow-edit"><input type="text" class="cell-input" id="odate-${{idx}}" value="${{r["発注日"] || ""}}" oninput="updateCell(${{idx}}, '発注日', this.value)" onkeydown="handleKeyDown(event, 'odate', ${{idx}})"></td>
                 </tr>`;
             }});
@@ -1648,12 +1714,12 @@ with tab3:
 
 with tab4:
     st.subheader("🔍 売上CSV 品番別・ファイル別 集計明細チェック")
-    if df_sales_detail.empty:
-        st.info("現在、売上CSVが読み込まれていません。画面右上のエクスパンダーから yayoi_*.csv を選択してください。")
+    if df_sales_filtered.empty:
+        st.info("選択された期間に合致する売上データはありません。")
     else:
         chk_c1, chk_c2 = st.columns([1, 2])
         kw_sales_chk = chk_c1.text_input("品番で売上集計を検索（例: AHL-1400 / ASC-001）", value="ASC-001")
-        df_s_filt = df_sales_detail[df_sales_detail["code_norm"].str.contains(kw_sales_chk.strip().upper(), na=False)] if kw_sales_chk else df_sales_detail
+        df_s_filt = df_sales_filtered[df_sales_filtered["code_norm"].str.contains(kw_sales_chk.strip().upper(), na=False)] if kw_sales_chk else df_sales_filtered
         chk_c2.metric(f"『{kw_sales_chk or '全商品'}』の集計売れ数 合計", f"{int(df_s_filt['qty'].sum()):,} 個", f"該当明細行数: {len(df_s_filt)} 行")
         st.dataframe(df_s_filt, hide_index=True, use_container_width=True, height=220)
 
