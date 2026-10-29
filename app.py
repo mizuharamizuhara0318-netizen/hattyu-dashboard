@@ -52,7 +52,7 @@ SUPABASE_KEY = "sb_publishable_S19HrcRBy63BGNbsSq69Xg_pZ05d3Z3"
 def init_supabase():
     try:
         return create_client(SUPABASE_URL, SUPABASE_KEY)
-    except Exception as e:
+    except Exception:
         return None
 
 supabase = init_supabase()
@@ -409,25 +409,22 @@ def load_yayoi_data(file_source):
 def fetch_sales_from_supabase(valid_norm_codes):
     valid_codes = set(valid_norm_codes)
     if not supabase:
-        st.warning("⚠️ Supabase client is not initialized.")
         return 0, pd.DataFrame(columns=["file", "date_str", "date_dt", "code_norm", "qty"])
     
     try:
         response = supabase.table("sales_data").select("*").execute()
         data = response.data
         if not data:
-            st.warning("⚠️ Supabase 'sales_data' テーブルからデータが取得できませんでした（0件）。")
             return 0, pd.DataFrame(columns=["file", "date_str", "date_dt", "code_norm", "qty"])
         
         df_db = pd.DataFrame(data)
-        st.sidebar.success(f"☁️ Supabase接続成功！全レコード数: {len(df_db):,} 行")
-        
         all_records = []
         for _, row in df_db.iterrows():
             c_val = normalize_code(row.get("商品コード", ""))
             q_val = to_num(row.get("数量", 0))
             if q_val > 0:
-                d_str = clean_str(row.get("伝票日付", ""))
+                # 実際のSQL定義に合わせた「日付」カラムを優先して取得
+                d_str = clean_str(row.get("日付", "")) or clean_str(row.get("伝票日付", ""))
                 dt_val = pd.to_datetime(d_str, format="%Y%m%d", errors="coerce")
                 if pd.isna(dt_val):
                     dt_val = pd.to_datetime(d_str, errors="coerce")
@@ -441,7 +438,6 @@ def fetch_sales_from_supabase(valid_norm_codes):
                 })
         
         if not all_records:
-            st.warning("⚠️ 有効な数量・日付のレコードが見つかりませんでした。")
             return len(df_db), pd.DataFrame(columns=["file", "date_str", "date_dt", "code_norm", "qty"])
         
         return len(df_db), pd.DataFrame(all_records)
