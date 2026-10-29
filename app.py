@@ -45,7 +45,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Supabase接続設定
 SUPABASE_URL = "https://zyeemvbskaefbtfxurdw.supabase.co"
 SUPABASE_KEY = "sb_publishable_S19HrcRBy63BGNbsSq69Xg_pZ05d3Z3"
 
@@ -53,7 +52,7 @@ SUPABASE_KEY = "sb_publishable_S19HrcRBy63BGNbsSq69Xg_pZ05d3Z3"
 def init_supabase():
     try:
         return create_client(SUPABASE_URL, SUPABASE_KEY)
-    except Exception:
+    except Exception as e:
         return None
 
 supabase = init_supabase()
@@ -410,38 +409,44 @@ def load_yayoi_data(file_source):
 def fetch_sales_from_supabase(valid_norm_codes):
     valid_codes = set(valid_norm_codes)
     if not supabase:
+        st.warning("⚠️ Supabase client is not initialized.")
         return 0, pd.DataFrame(columns=["file", "date_str", "date_dt", "code_norm", "qty"])
     
     try:
-        # Supabaseの sales_data テーブルから全件取得
         response = supabase.table("sales_data").select("*").execute()
         data = response.data
         if not data:
+            st.warning("⚠️ Supabase 'sales_data' テーブルからデータが取得できませんでした（0件）。")
             return 0, pd.DataFrame(columns=["file", "date_str", "date_dt", "code_norm", "qty"])
         
         df_db = pd.DataFrame(data)
+        st.sidebar.success(f"☁️ Supabase接続成功！全レコード数: {len(df_db):,} 行")
+        
         all_records = []
         for _, row in df_db.iterrows():
             c_val = normalize_code(row.get("商品コード", ""))
-            if c_val in valid_codes:
-                q_val = to_num(row.get("数量", 0))
-                if q_val > 0:
-                    d_str = clean_str(row.get("伝票日付", ""))
-                    dt_val = pd.to_datetime(d_str, format="%Y%m%d", errors="coerce")
-                    all_records.append({
-                        "file": "Supabase (sales_data)",
-                        "date_str": d_str,
-                        "date_dt": dt_val,
-                        "code_norm": c_val,
-                        "qty": q_val
-                    })
+            q_val = to_num(row.get("数量", 0))
+            if q_val > 0:
+                d_str = clean_str(row.get("伝票日付", ""))
+                dt_val = pd.to_datetime(d_str, format="%Y%m%d", errors="coerce")
+                if pd.isna(dt_val):
+                    dt_val = pd.to_datetime(d_str, errors="coerce")
+                
+                all_records.append({
+                    "file": "Supabase (sales_data)",
+                    "date_str": d_str,
+                    "date_dt": dt_val,
+                    "code_norm": c_val,
+                    "qty": q_val
+                })
         
         if not all_records:
-            return 1, pd.DataFrame(columns=["file", "date_str", "date_dt", "code_norm", "qty"])
+            st.warning("⚠️ 有効な数量・日付のレコードが見つかりませんでした。")
+            return len(df_db), pd.DataFrame(columns=["file", "date_str", "date_dt", "code_norm", "qty"])
         
-        return 1, pd.DataFrame(all_records)
+        return len(df_db), pd.DataFrame(all_records)
     except Exception as e:
-        st.error(f"Supabaseデータ取得エラー: {e}")
+        st.error(f"❌ Supabaseデータ取得エラー: {e}")
         return 0, pd.DataFrame(columns=["file", "date_str", "date_dt", "code_norm", "qty"])
 
 # ---------------------------------------------------------
@@ -526,7 +531,7 @@ for _, r in df_main.iterrows():
 all_valid_norm_codes = tuple(set(df_main["品番_正規化"].unique()) | set(item_name_map.keys()))
 
 # Supabase から売上データを取得
-sales_file_cnt, df_sales_all = fetch_sales_from_supabase(all_valid_norm_codes)
+db_total_cnt, df_sales_all = fetch_sales_from_supabase(all_valid_norm_codes)
 
 # ---------------------------------------------------------
 # 期間ショートカット ＆ フィルタUI
@@ -608,7 +613,7 @@ asc001_qty = int(active_sales_dict.get("ASC-001", 0)) if active_sales_dict else 
 st.caption(
     f"☁️ **Supabase (sales_data) 連携中** ｜ 発注検討表: **{len(m_df):,}** 商品 ｜ "
     f"得意先マスタ: **{len(master_comps):,}** 社 ｜ "
-    f"🔥 【{shortcut_mode}】売れ数合計: **{total_sales_qty:,}** 個 （DBレコード件数: {len(df_sales_all):,} 件 ／ ASC-001: **{asc001_qty:,}** 個）"
+    f"🔥 【{shortcut_mode}】売れ数合計: **{total_sales_qty:,}** 個 （DB総件数: {db_total_cnt:,} 件 ／ 期間内マッチ件数: {len(df_sales_filtered):,} 件 ／ ASC-001: **{asc001_qty:,}** 個）"
 )
 
 tab1, tab2, tab3, tab4 = st.tabs([
