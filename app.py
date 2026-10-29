@@ -9,8 +9,9 @@ import json
 import zipfile
 import io
 import time
+from supabase import create_client, Client
 
-st.set_page_config(page_title="発注検討表 ＆ 弥生受注管理システム", layout="wide")
+st.set_page_config(page_title="発注検討表 ＆ 弥生受注管理システム（Supabase連動版）", layout="wide")
 
 st.markdown("""
 <style>
@@ -44,6 +45,19 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# Supabase接続設定
+SUPABASE_URL = "https://zyeemvbskaefbtfxurdw.supabase.co"
+SUPABASE_KEY = "sb_publishable_S19HrcRBy63BGNbsSq69Xg_pZ05d3Z3"
+
+@st.cache_resource
+def init_supabase():
+    try:
+        return create_client(SUPABASE_URL, SUPABASE_KEY)
+    except Exception:
+        return None
+
+supabase = init_supabase()
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in locals() else "."
 
 SEARCH_DIRS = [
@@ -55,6 +69,8 @@ SEARCH_DIRS = [
     "/content/drive/MyDrive/発注検討",
     "/content/drive/MyDrive/売上ダッシュボード/済"
 ]
+
+DEFAULT_AMZ_SEP_2026 = []
 
 def find_target_file(keywords, ext=".xlsx"):
     for d in SEARCH_DIRS:
@@ -390,117 +406,52 @@ def load_yayoi_data(file_source):
         df = df.sort_values(by=["受注日_dt", "納入期日_dt"], ascending=[False, False], na_position="last")
     return df
 
-def parse_sales_files_to_records(uploaded_files, valid_norm_codes):
+@st.cache_data
+def fetch_sales_from_supabase(valid_norm_codes):
     valid_codes = set(valid_norm_codes)
-    all_records = []
-
-    processed_files = []
-    if uploaded_files:
-        for f in uploaded_files:
-            fname = getattr(f, "name", "uploaded.csv")
-            if fname.lower().endswith(".zip"):
-                try:
-                    f.seek(0)
-                    with zipfile.ZipFile(io.BytesIO(f.read())) as z:
-                        for zname in z.namelist():
-                            if zname.lower().endswith(".csv") and not zname.startswith("__MACOSX") and not zname.startswith("._"):
-                                with z.open(zname) as zf:
-                                    processed_files.append((zname, io.BytesIO(zf.read())))
-                except Exception as ze:
-                    st.error(f"ZIP解凍エラー ({fname}): {ze}")
-            else:
-                f.seek(0)
-                processed_files.append((fname, f))
-
-    local_csv_paths = []
-    for d in SEARCH_DIRS:
-        if os.path.exists(d):
-            try:
-                local_csv_paths.extend(glob.glob(os.path.join(d, "yayoi_*.csv")))
-                local_csv_paths.extend(glob.glob(os.path.join(d, "*yayoi*.csv")))
-                local_csv_paths.extend(glob.glob(os.path.join(d, "*.csv")))
-            except Exception:
-                pass
-    local_csv_paths = sorted(list(set(local_csv_paths)))
-
-    if not processed_files and not local_csv_paths:
-        return 0, pd.DataFrame()
-
-    sources = processed_files if processed_files else [(os.path.basename(p), p) for p in local_csv_paths]
-    loaded_file_count = 0
-
-    for fname, f in sources:
-        df_s = None
-        for enc in ["cp932", "shift_jis", "utf-8-sig", "utf-8"]:
-            try:
-                if isinstance(f, str):
-                    df_s = pd.read_csv(f, encoding=enc, header=None, dtype=str)
-                else:
-                    f.seek(0)
-                    df_s = pd.read_csv(f, encoding=enc, header=None, dtype=str)
-                if df_s is not None and not df_s.empty:
-                    break
-            except Exception:
-                continue
-
-        if df_s is None or df_s.empty:
-            continue
-
-        loaded_file_count += 1
-        code_col = 15
-        qty_col = 23
-        start_row = 0
-        for r_i in range(min(5, len(df_s))):
-            row_str = [str(x).strip() for x in df_s.iloc[r_i].values]
-            if "商品コード" in row_str:
-                start_row = r_i + 1
-                code_col = row_str.index("商品コード")
-                if "数量" in row_str:
-                    qty_col = row_str.index("数量")
-                break
-
-        for r_i in range(start_row, len(df_s)):
-            row_vals = df_s.iloc[r_i].values
-            if len(row_vals) <= max(code_col, qty_col):
-                continue
-
-            c_val = normalize_code(row_vals[code_col])
+    if not supabase:
+        return 0, pd.DataFrame(columns=["file", "date_str", "date_dt", "code_norm", "qty"])
+    
+    try:
+        # Supabaseの sales_data テーブルから全件取得
+        response = supabase.table("sales_data").select("*").execute()
+        data = response.data
+        if not data:
+            return 0, pd.DataFrame(columns=["file", "date_str", "date_dt", "code_norm", "qty"])
+        
+        df_db = pd.DataFrame(data)
+        all_records = []
+        for _, row in df_db.iterrows():
+            c_val = normalize_code(row.get("商品コード", ""))
             if c_val in valid_codes:
-                q_val = to_num(row_vals[qty_col])
+                q_val = to_num(row.get("数量", 0))
                 if q_val > 0:
-                    d_str = clean_str(row_vals[3]) if len(row_vals) > 3 else ""
-                    # Parse date YYYYMMDD
+                    d_str = clean_str(row.get("伝票日付", ""))
                     dt_val = pd.to_datetime(d_str, format="%Y%m%d", errors="coerce")
                     all_records.append({
-                        "file": fname,
+                        "file": "Supabase (sales_data)",
                         "date_str": d_str,
                         "date_dt": dt_val,
                         "code_norm": c_val,
                         "qty": q_val
                     })
-
-    if not all_records:
-        return loaded_file_count, pd.DataFrame(columns=["file", "date_str", "date_dt", "code_norm", "qty"])
-
-    return loaded_file_count, pd.DataFrame(all_records)
+        
+        if not all_records:
+            return 1, pd.DataFrame(columns=["file", "date_str", "date_dt", "code_norm", "qty"])
+        
+        return 1, pd.DataFrame(all_records)
+    except Exception as e:
+        st.error(f"Supabaseデータ取得エラー: {e}")
+        return 0, pd.DataFrame(columns=["file", "date_str", "date_dt", "code_norm", "qty"])
 
 # ---------------------------------------------------------
-# ヘッダー ＆ アップローダー（session_state保持でリセット防止）
+# ヘッダー ＆ アップローダー
 # ---------------------------------------------------------
-if "persisted_sales_files" not in st.session_state:
-    st.session_state["persisted_sales_files"] = None
-
 head_col1, head_col2 = st.columns([3.2, 2.0])
 with head_col1:
-    st.markdown('<div class="app-header">📊 発注検討表 ＆ 弥生受注管理システム（完全連動版）</div>', unsafe_allow_html=True)
+    st.markdown('<div class="app-header">📊 発注検討表 ＆ 弥生受注管理システム（Supabase連動版）</div>', unsafe_allow_html=True)
 with head_col2:
-    with st.expander("📂 売上CSV・ZIP ＆ 最新Excelの読込・更新", expanded=False):
-        up_sales_raw = st.file_uploader("🔥 売上CSV または ZIPファイル（複数選択・ZIP一括ドロップ対応）", type=["csv", "zip"], accept_multiple_files=True, key="up_s_raw")
-        if up_sales_raw:
-            st.session_state["persisted_sales_files"] = up_sales_raw
-        
-        up_sales = st.session_state["persisted_sales_files"]
-
+    with st.expander("📂 最新Excelマスターの読込・更新", expanded=False):
         u_c1, u_c2 = st.columns(2)
         up_main = u_c1.file_uploader("📋 発注検討表.xlsx", type=["xlsx"], key="up_m")
         up_yayoi = u_c2.file_uploader("📑 弥生確保リスト.xlsx", type=["xlsx"], key="up_y")
@@ -508,12 +459,7 @@ with head_col2:
         up_comp = u_c3.file_uploader("🏢 弥生会社名.xlsx", type=["xlsx"], key="up_comp")
         up_item = u_c4.file_uploader("📦 弥生商品番号.xlsx", type=["xlsx"], key="up_item")
 
-        col_btn1, col_btn2 = st.columns(2)
-        if col_btn1.button("🔄 最新状態に再読み込み", use_container_width=True):
-            st.cache_data.clear()
-            st.rerun()
-        if col_btn2.button("🗑️ 読込CSVをクリア", use_container_width=True):
-            st.session_state["persisted_sales_files"] = None
+        if st.button("🔄 最新状態に再読み込み", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
 
@@ -578,10 +524,12 @@ for _, r in df_main.iterrows():
         item_name_map[ic] = clean_str(r["商品区分"])
 
 all_valid_norm_codes = tuple(set(df_main["品番_正規化"].unique()) | set(item_name_map.keys()))
-sales_file_cnt, df_sales_all = parse_sales_files_to_records(up_sales, all_valid_norm_codes)
+
+# Supabase から売上データを取得
+sales_file_cnt, df_sales_all = fetch_sales_from_supabase(all_valid_norm_codes)
 
 # ---------------------------------------------------------
-# 期間ショートカット ＆ フィルタUI（画像準拠）
+# 期間ショートカット ＆ フィルタUI
 # ---------------------------------------------------------
 st.markdown('<div class="filter-box">', unsafe_allow_html=True)
 sc_col1, sc_col2 = st.columns([1.2, 4.0])
@@ -593,7 +541,6 @@ shortcut_mode = sc_col2.radio(
     label_visibility="collapsed"
 )
 
-# 基準日（データ内の最大日付、または本日の日付）
 if not df_sales_all.empty and df_sales_all["date_dt"].notna().any():
     max_dt = df_sales_all["date_dt"].max()
 else:
@@ -610,7 +557,6 @@ elif shortcut_mode == "前月":
     end_dt = first_this_month - pd.Timedelta(days=1)
     start_dt = pd.Timestamp(end_dt.year, end_dt.month, 1)
 elif shortcut_mode == "当期累計（7月〜6月）":
-    # 7月始まり（7月〜翌年6月）
     if max_dt.month >= 7:
         fy_start_year = max_dt.year
     else:
@@ -629,7 +575,6 @@ elif shortcut_mode == "全データ累計":
     end_dt = pd.Timestamp("2100-12-31")
 elif shortcut_mode == "手動指定":
     m_col1, m_col2 = st.columns(2)
-    # デフォルトを当月に設定
     def_start = pd.Timestamp(max_dt.year, max_dt.month, 1).date()
     def_end = max_dt.date()
     s_date_input = m_col1.date_input("開始日", value=def_start)
@@ -639,7 +584,6 @@ elif shortcut_mode == "手動指定":
 
 st.markdown('</div>', unsafe_allow_html=True)
 
-# データのフィルタリング
 if not df_sales_all.empty and "date_dt" in df_sales_all.columns:
     mask = (df_sales_all["date_dt"] >= start_dt) & (df_sales_all["date_dt"] <= end_dt)
     df_sales_filtered = df_sales_all[mask].copy()
@@ -662,16 +606,16 @@ hist_dict = {} if 'df_hist' in locals() and df_hist is not None and not df_hist.
 total_sales_qty = int(m_df["今月売れ数"].sum())
 asc001_qty = int(active_sales_dict.get("ASC-001", 0)) if active_sales_dict else 0
 st.caption(
-    f"✅ **最新データ完全連動中** ｜ 発注検討表: **{len(m_df):,}** 商品 ｜ "
+    f"☁️ **Supabase (sales_data) 連携中** ｜ 発注検討表: **{len(m_df):,}** 商品 ｜ "
     f"得意先マスタ: **{len(master_comps):,}** 社 ｜ "
-    f"🔥 【{shortcut_mode}】売れ数合計: **{total_sales_qty:,}** 個 （読込ファイル: {sales_file_cnt} 件 ／ ASC-001: **{asc001_qty:,}** 個）"
+    f"🔥 【{shortcut_mode}】売れ数合計: **{total_sales_qty:,}** 個 （DBレコード件数: {len(df_sales_all):,} 件 ／ ASC-001: **{asc001_qty:,}** 個）"
 )
 
 tab1, tab2, tab3, tab4 = st.tabs([
     f"📋 1. 発注検討表（発注点リアルタイム連動版）",
     "🏢 2. 会社（得意先）別・受注番号別 確保リスト（特大ポップアップ）",
     "💻 3. 弥生受注伝票（コード・商品名・倉庫名 分離版 ／ 最大100行）",
-    "🕒 4. 入荷予定・会議履歴 ＆ 売上CSV検証"
+    "🕒 4. 入荷予定・会議履歴 ＆ 売上データ検証"
 ])
 
 with tab1:
@@ -1713,7 +1657,7 @@ with tab3:
         st.info("手入力で新しく登録された伝票はまだありません。上のフォームから登録できます。")
 
 with tab4:
-    st.subheader("🔍 売上CSV 品番別・ファイル別 集計明細チェック")
+    st.subheader("🔍 Supabase売上データ（sales_data） 品番別・レコード確認")
     if df_sales_filtered.empty:
         st.info("選択された期間に合致する売上データはありません。")
     else:
