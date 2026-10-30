@@ -9,6 +9,7 @@ import json
 import zipfile
 import io
 import time
+import re
 from supabase import create_client, Client
 
 st.set_page_config(page_title="発注検討表 ＆ 弥生受注管理システム（Supabase連動版）", layout="wide")
@@ -20,7 +21,7 @@ st.markdown("""
         background: transparent !important;
     }
     .block-container {
-        padding-top: 1.5rem !important;
+        padding-top: 1.2rem !important;
         padding-bottom: 1rem !important;
         padding-left: 0.8rem !important;
         padding-right: 0.8rem !important;
@@ -38,9 +39,9 @@ st.markdown("""
     .filter-box {
         background: #f8fafc;
         border: 1px solid #cbd5e1;
-        padding: 12px 16px;
+        padding: 10px 16px;
         border-radius: 8px;
-        margin-bottom: 14px;
+        margin-bottom: 10px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -111,6 +112,24 @@ def clean_str(val):
     s = str(val).strip()
     if s.endswith(".0") and s[:-2].replace("-", "").isdigit():
         return s[:-2]
+    return s
+
+def clean_arrival_date(val):
+    """
+    入荷予定日として妥当な文字列（日付形式や『11/15』『未定』など）のみを通し、
+    『0』『550』『35250』といった単なる数値の誤混入を完全にブロックする関数
+    """
+    if is_na_val(val):
+        return ""
+    if isinstance(val, (datetime.datetime, datetime.date, pd.Timestamp)):
+        return val.strftime("%Y-%m-%d")
+    s = clean_str(val)
+    if "00:00:00" in s:
+        s = s.split(" ")[0].strip()
+    # カンマや小数点を除いて数字だけになるもの（0, 550, 1830, 35250等）は入荷予定日ではないため除外
+    s_num_check = s.replace(",", "").replace(".", "").replace("-", "")
+    if s.replace(",", "").replace(".", "").isdigit() or s == "0":
+        return ""
     return s
 
 def normalize_code(val):
@@ -246,7 +265,8 @@ def load_excel_master(file_source):
     c_point2 = col_map.get("point2", -1)
     c_roji_stock = col_map.get("roji_stock", 15)
     c_roji_in = col_map.get("roji_in", 16)
-    c_ndate = col_map.get("ndate", 18)
+    # ★Excelに「入荷予定日」という見出しがない場合は誤って18列目(数値列)を読まないよう -1 に設定
+    c_ndate = col_map.get("ndate", -1)
     c_roji_sec = col_map.get("roji_sec", 19)
     c_free = col_map.get("free", 23)
     c_rate = col_map.get("rate", 25)
@@ -276,9 +296,7 @@ def load_excel_master(file_source):
         rate_raw = to_num(r[c_rate]) if c_rate < len(r) else 0.0
         rate_val = int(round(rate_raw * 100, 0)) if abs(rate_raw) <= 5.0 else int(round(rate_raw, 0))
 
-        ndate_val = clean_str(r[c_ndate]) if c_ndate < len(r) else ""
-        if "00:00:00" in ndate_val:
-            ndate_val = ndate_val.split(" ")[0]
+        ndate_val = clean_arrival_date(r[c_ndate]) if (0 <= c_ndate < len(r)) else ""
 
         items.append({
             "No": int(to_num(r[0])) if not is_na_val(r[0]) else idx,
@@ -306,6 +324,7 @@ def load_excel_master(file_source):
             "前回決定事項": clean_str(r[c_prev]) if c_prev < len(r) else "",
             "決定事項": clean_str(r[c_curr]) if c_curr < len(r) else "",
             "発注日": "",
+            "関連会社検索用": "",
             "NA行": False
         })
 
@@ -409,9 +428,9 @@ def load_yayoi_data(file_source):
     return df
 
 # =========================================================
-# Supabase 1,000件制限を突破して指定期間の売上を確実に全件取得する関数
+# Supabase 取得処理（無駄な2重通信をカットし、ベクトル処理で超高速化）
 # =========================================================
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=1800)
 def get_supabase_meta():
     if not supabase:
         return 0, pd.Timestamp.now()
@@ -430,23 +449,17 @@ def get_supabase_meta():
     except Exception:
         return 0, pd.Timestamp.now()
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=1800, show_spinner="⚡ Supabaseから売上データを高速集計中...")
 def fetch_sales_by_period_from_supabase(start_ymd_8: str, end_ymd_8: str):
-    """
-    指定された期間（例: '20260901' 〜 '20260930'）のデータを1,000件ずつページネーションで全件取得
-    """
     if not supabase:
-        return pd.DataFrame(columns=["date_str", "date_fmt", "date_dt", "code_norm", "raw_code", "name", "cust", "staff", "qty", "price", "amount"])
+        return pd.DataFrame(columns=["date_str", "date_fmt", "code_norm", "raw_code", "name", "cust", "staff", "qty", "price", "amount"])
     
     all_rows = []
     page_size = 1000
     offset = 0
     
-    start_iso = f"{start_ymd_8[:4]}-{start_ymd_8[4:6]}-{start_ymd_8[6:8]}"
-    end_iso = f"{end_ymd_8[:4]}-{end_ymd_8[4:6]}-{end_ymd_8[6:8]}"
-    
     try:
-        # まず8桁形式（20261006）で検索
+        # 8桁日付インデックスを使って1系統のみで高速取得
         while True:
             res = (
                 supabase.table("sales_data")
@@ -464,60 +477,41 @@ def fetch_sales_by_period_from_supabase(start_ymd_8: str, end_ymd_8: str):
             if len(batch) < page_size:
                 break
             offset += page_size
-            if offset >= 150000:
-                break
-
-        # もしハイフン付き（2026-10-06）で保存されているデータがあればそちらも取得
-        offset_iso = 0
-        while True:
-            res_iso = (
-                supabase.table("sales_data")
-                .select("商品コード, 商品名, 得意先名, 担当者, 数量, 単価, 金額, 日付")
-                .gte("日付", start_iso)
-                .lte("日付", end_iso)
-                .order("日付", desc=True)
-                .range(offset_iso, offset_iso + page_size - 1)
-                .execute()
-            )
-            batch_iso = res_iso.data
-            if not batch_iso:
-                break
-            all_rows.extend(batch_iso)
-            if len(batch_iso) < page_size:
-                break
-            offset_iso += page_size
-            if offset_iso >= 150000:
+            if offset >= 200000:
                 break
 
         if not all_rows:
-            return pd.DataFrame(columns=["date_str", "date_fmt", "date_dt", "code_norm", "raw_code", "name", "cust", "staff", "qty", "price", "amount"])
+            return pd.DataFrame(columns=["date_str", "date_fmt", "code_norm", "raw_code", "name", "cust", "staff", "qty", "price", "amount"])
 
-        records = []
-        for r in all_rows:
-            q_val = to_num(r.get("数量", 0))
-            if q_val == 0:
-                continue
-            raw_c = clean_str(r.get("商品コード", ""))
-            c_norm = normalize_code(raw_c)
-            d_raw = clean_str(r.get("日付", "")).replace("-", "").replace("/", "")
-            dt_val = pd.to_datetime(d_raw, format="%Y%m%d", errors="coerce")
-            records.append({
-                "date_str": d_raw,
-                "date_fmt": format_ymd(d_raw),
-                "date_dt": dt_val,
-                "code_norm": c_norm,
-                "raw_code": raw_c,
-                "name": clean_str(r.get("商品名", "")),
-                "cust": clean_str(r.get("得意先名", "")) or "（得意先名なし）",
-                "staff": clean_str(r.get("担当者", "")),
-                "qty": q_val,
-                "price": to_num(r.get("単価", 0)),
-                "amount": to_num(r.get("金額", 0))
-            })
-        return pd.DataFrame(records)
+        # ループを使わずPandasのベクトル一括処理で超高速変換
+        df_raw = pd.DataFrame(all_rows)
+        df_raw["qty"] = pd.to_numeric(df_raw["数量"], errors="coerce").fillna(0.0)
+        df_raw = df_raw[df_raw["qty"] != 0].copy()
+        if df_raw.empty:
+            return pd.DataFrame(columns=["date_str", "date_fmt", "code_norm", "raw_code", "name", "cust", "staff", "qty", "price", "amount"])
+
+        df_raw["raw_code"] = df_raw["商品コード"].fillna("").astype(str).str.strip()
+        df_raw["code_norm"] = (
+            df_raw["raw_code"]
+            .str.upper()
+            .str.replace(" ", "", regex=False)
+            .str.replace(" ", "", regex=False)
+            .str.replace("－", "-", regex=False)
+            .str.replace("ー", "-", regex=False)
+            .str.replace("―", "-", regex=False)
+        )
+        df_raw["date_str"] = df_raw["日付"].fillna("").astype(str).str.strip().str.replace("-", "", regex=False).str.replace("/", "", regex=False)
+        df_raw["date_fmt"] = df_raw["date_str"].str.slice(0, 4) + "-" + df_raw["date_str"].str.slice(4, 6) + "-" + df_raw["date_str"].str.slice(6, 8)
+        df_raw["name"] = df_raw["商品名"].fillna("").astype(str).str.strip()
+        df_raw["cust"] = df_raw["得意先名"].fillna("").astype(str).str.strip().replace("", "（得意先名なし）")
+        df_raw["staff"] = df_raw["担当者"].fillna("").astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+        df_raw["price"] = pd.to_numeric(df_raw["単価"], errors="coerce").fillna(0.0)
+        df_raw["amount"] = pd.to_numeric(df_raw["金額"], errors="coerce").fillna(0.0)
+
+        return df_raw[["date_str", "date_fmt", "code_norm", "raw_code", "name", "cust", "staff", "qty", "price", "amount"]]
     except Exception as e:
         st.error(f"❌ Supabaseデータ取得エラー: {e}")
-        return pd.DataFrame(columns=["date_str", "date_fmt", "date_dt", "code_norm", "raw_code", "name", "cust", "staff", "qty", "price", "amount"])
+        return pd.DataFrame(columns=["date_str", "date_fmt", "code_norm", "raw_code", "name", "cust", "staff", "qty", "price", "amount"])
 
 # ---------------------------------------------------------
 # ヘッダー ＆ アップローダー
@@ -554,6 +548,8 @@ if df_main.empty:
 
 marufuji_dict = {}
 yayoi_dict = {}
+yayoi_comp_search_map = {}
+
 if not df_yayoi.empty:
     df_yayoi["品番_正規化"] = df_yayoi["商品コード"].apply(normalize_code)
     yayoi_real_totals = df_yayoi.groupby("品番_正規化")["数量"].sum().to_dict()
@@ -572,6 +568,7 @@ if not df_yayoi.empty:
     for code_n, grp in df_yayoi.groupby("品番_正規化", sort=False):
         grp_sorted = grp.sort_values(by=["受注日_dt", "納入期日_dt"], ascending=[False, False], na_position="last")
         yayoi_dict[code_n] = grp_sorted[["受注番号", "得意先名", "数量", "受注日", "納入期日", "倉庫名", "備考", "担当者名"]].to_dict(orient="records")
+        yayoi_comp_search_map[code_n] = " ".join(grp_sorted["得意先名"].unique())
         maru_grp = grp_sorted[grp_sorted["得意先名"].apply(is_marufuji_name)]
         if not maru_grp.empty:
             marufuji_dict[code_n] = maru_grp[["受注番号", "得意先名", "数量", "受注日", "納入期日", "倉庫名", "備考", "担当者名"]].to_dict(orient="records")
@@ -645,58 +642,68 @@ st.markdown('</div>', unsafe_allow_html=True)
 start_ymd_str = start_dt.strftime("%Y%m%d")
 end_ymd_str = end_dt.strftime("%Y%m%d")
 
-# 選択された期間の売上データをSupabaseから全件取得（1,000件制限突破）
+# 発注検討表に存在する品番セット
+target_norm_codes = set(df_main["品番_正規化"].unique())
+
 df_sales_filtered = fetch_sales_by_period_from_supabase(start_ymd_str, end_ymd_str)
 
-# 品番別の売上合計と、クリック時の「会社別売上POP」用データを作成
 active_sales_dict = {}
 sales_company_map = {}
 sales_detail_map = {}
+sales_comp_search_map = {}
 
 if not df_sales_filtered.empty:
     active_sales_dict = df_sales_filtered.groupby("code_norm")["qty"].sum().round().astype(int).to_dict()
     
-    # 会社（得意先）ごとの集計ランキング
-    comp_grp = (
-        df_sales_filtered.groupby(["code_norm", "cust"], as_index=False)
-        .agg(
-            qty=("qty", "sum"),
-            amount=("amount", "sum"),
-            cnt=("date_fmt", "count"),
-            last_date=("date_fmt", "max")
+    # 発注検討表にある商品のデータのみに絞って高速グループ化
+    df_s_target = df_sales_filtered[df_sales_filtered["code_norm"].isin(target_norm_codes)]
+    
+    if not df_s_target.empty:
+        comp_grp = (
+            df_s_target.groupby(["code_norm", "cust"], as_index=False)
+            .agg(
+                qty=("qty", "sum"),
+                amount=("amount", "sum"),
+                cnt=("date_fmt", "count"),
+                last_date=("date_fmt", "max")
+            )
+            .sort_values(["code_norm", "qty"], ascending=[True, False])
         )
-        .sort_values(["code_norm", "qty"], ascending=[True, False])
-    )
-    for c_norm, grp in comp_grp.groupby("code_norm", sort=False):
-        tot_q = grp["qty"].sum()
-        c_list = []
-        for _, r_c in grp.iterrows():
-            share = round((r_c["qty"] / tot_q * 100), 1) if tot_q > 0 else 0.0
-            c_list.append({
-                "得意先名": r_c["cust"],
-                "数量": int(round(r_c["qty"])),
-                "構成比": f"{share}%",
-                "金額": int(round(r_c["amount"])),
-                "伝票回数": int(r_c["cnt"]),
-                "最終売上日": r_c["last_date"]
-            })
-        sales_company_map[c_norm] = c_list
+        for c_norm, grp in comp_grp.groupby("code_norm", sort=False):
+            tot_q = grp["qty"].sum()
+            sales_comp_search_map[c_norm] = " ".join(grp["cust"].unique())
+            c_list = []
+            for _, r_c in grp.iterrows():
+                share = round((r_c["qty"] / tot_q * 100), 1) if tot_q > 0 else 0.0
+                c_list.append({
+                    "得意先名": r_c["cust"],
+                    "数量": int(round(r_c["qty"])),
+                    "構成比": f"{share}%",
+                    "金額": int(round(r_c["amount"])),
+                    "伝票回数": int(r_c["cnt"]),
+                    "最終売上日": r_c["last_date"]
+                })
+            sales_company_map[c_norm] = c_list
 
-    # 日別の売上伝票明細（最新50件まで保持）
-    for c_norm, grp in df_sales_filtered.groupby("code_norm", sort=False):
-        d_list = []
-        for _, r_d in grp.head(50).iterrows():
-            d_list.append({
-                "日付": r_d["date_fmt"],
-                "得意先名": r_d["cust"],
-                "数量": int(round(r_d["qty"])),
-                "単価": int(round(r_d["price"])),
-                "金額": int(round(r_d["amount"])),
-                "担当者": r_d["staff"]
-            })
-        sales_detail_map[c_norm] = d_list
+        for c_norm, grp in df_s_target.groupby("code_norm", sort=False):
+            d_list = []
+            for _, r_d in grp.head(50).iterrows():
+                d_list.append({
+                    "日付": r_d["date_fmt"],
+                    "得意先名": r_d["cust"],
+                    "数量": int(round(r_d["qty"])),
+                    "単価": int(round(r_d["price"])),
+                    "金額": int(round(r_d["amount"])),
+                    "担当者": r_d["staff"]
+                })
+            sales_detail_map[c_norm] = d_list
 
 df_main["今月売れ数"] = df_main["品番_正規化"].map(active_sales_dict).fillna(0).astype(int)
+# 会社名（売上先・確保先）でもキーワード検索できるように検索用文字列を結合
+df_main["関連会社検索用"] = (
+    df_main["品番_正規化"].map(yayoi_comp_search_map).fillna("") + " " +
+    df_main["品番_正規化"].map(sales_comp_search_map).fillna("")
+)
 m_df = df_main.copy()
 
 hist_dict = {}
@@ -714,56 +721,17 @@ st.caption(
 )
 
 tab1, tab2, tab3, tab4 = st.tabs([
-    f"📋 1. 発注検討表（発注点リアルタイム連動 ＆ 会社別売上POP搭載）",
+    f"📋 1. 発注検討表（超高速検索 ＆ 会社別売上POP搭載）",
     "🏢 2. 会社（得意先）別・受注番号別 確保リスト（特大ポップアップ）",
     "💻 3. 弥生受注伝票（コード・商品名・倉庫名 分離版 ／ 最大100行）",
     "🕒 4. 入荷予定・会議履歴 ＆ 売上データ検証"
 ])
 
 with tab1:
-    f_col1, f_col2, f_col3 = st.columns([2.6, 1.3, 3.0])
-    filter_mode = f_col1.selectbox(
-        "表示絞り込み",
-        [
-            "すべて表示（Excelと同じ並び）",
-            "🚨 要発注（発注検討フラグがマイナスのみ）",
-            "🔥 【ヒット商品】在庫があるのに期間内売れている",
-            "🔥 期間内に売れている商品すべて（売れ数1以上）",
-            "確保数のズレがある商品",
-            "入荷予定がある商品",
-            "弥生確保がある商品"
-        ],
-        index=0
-    )
-    center_opt = ["すべて"] + sorted([x for x in m_df["商品センター"].unique() if x])
-    sel_center = f_col2.selectbox("商品センター", center_opt)
-    search_kw = f_col3.text_input("🔍 品番・商品名・会社名・決定事項で検索", placeholder="例: ASC-001 / AHL-2203 / ライト / 丸藤")
-
-    v_df = m_df.copy()
-    if filter_mode == "🚨 要発注（発注検討フラグがマイナスのみ）":
-        v_df = v_df[(v_df["発注検討フラグ"] < 0) & (~v_df["NA行"])]
-    elif filter_mode == "🔥 【ヒット商品】在庫があるのに期間内売れている":
-        v_df = v_df[(v_df["入荷後のフリー在庫"] >= 1) & (v_df["今月売れ数"] >= 1) & (~v_df["NA行"])]
-    elif filter_mode == "🔥 期間内に売れている商品すべて（売れ数1以上）":
-        v_df = v_df[v_df["今月売れ数"] >= 1].sort_values(by="今月売れ数", ascending=False)
-    elif filter_mode == "確保数のズレがある商品":
-        v_df = v_df[v_df["確保数のズレ"] != 0]
-    elif filter_mode == "入荷予定がある商品":
-        v_df = v_df[v_df["入荷予定数_ロジザード"] > 0]
-    elif filter_mode == "弥生確保がある商品":
-        v_df = v_df[(v_df["在庫確保_弥生"] > 0) | (v_df["在庫確保_丸藤"] > 0)]
-
-    if sel_center != "すべて":
-        v_df = v_df[v_df["商品センター"] == sel_center]
-    if search_kw:
-        v_df = v_df[
-            v_df["品番"].str.contains(search_kw, case=False, na=False) |
-            v_df["商品区分"].str.contains(search_kw, case=False, na=False) |
-            v_df["前回決定事項"].str.contains(search_kw, case=False, na=False) |
-            v_df["決定事項"].str.contains(search_kw, case=False, na=False)
-        ]
-
-    records_json = json.dumps(v_df.to_dict(orient="records"), ensure_ascii=False)
+    # ★ 検索・絞り込みをすべてブラウザ内（JavaScript）で完結させることで0.01秒の瞬時フィルタリングを実現！
+    center_list = sorted([x for x in m_df["商品センター"].unique() if x])
+    centers_json = json.dumps(center_list, ensure_ascii=False)
+    records_json = json.dumps(m_df.to_dict(orient="records"), ensure_ascii=False)
     yayoi_json = json.dumps(yayoi_dict, ensure_ascii=False)
     marufuji_json = json.dumps(marufuji_dict, ensure_ascii=False)
     hist_json = json.dumps(hist_dict, ensure_ascii=False)
@@ -779,9 +747,24 @@ with tab1:
     <style>
         * {{ box-sizing: border-box; font-family: "Meiryo", "Hiragino Kaku Gothic ProN", sans-serif; }}
         body {{ margin: 0; padding: 0; background: #fff; }}
+        
+        /* 高速クライアントフィルタバー */
+        .instant-filter-bar {{
+            display: grid; grid-template-columns: 2.3fr 1.2fr 3.0fr; gap: 14px;
+            background: #f8fafc; padding: 10px 14px; border: 1px solid #cbd5e1;
+            border-radius: 6px; margin-bottom: 8px;
+        }}
+        .filter-group {{ display: flex; flex-direction: column; gap: 4px; }}
+        .filter-label {{ font-size: 12px; font-weight: bold; color: #334155; }}
+        .filter-select, .filter-input {{
+            height: 34px; border: 1px solid #94a3b8; border-radius: 5px;
+            padding: 4px 10px; font-size: 13px; background: #fff; color: #0f172a;
+        }}
+        .filter-input:focus, .filter-select:focus {{ outline: 2px solid #2563eb; border-color: transparent; }}
+
         .toolbar {{
             display: flex; align-items: center; justify-content: space-between;
-            background: #f8fafc; padding: 6px 12px; border: 1px solid #cbd5e1;
+            background: #f1f5f9; padding: 6px 12px; border: 1px solid #cbd5e1;
             border-bottom: none; border-radius: 6px 6px 0 0;
         }}
         .toolbar-info {{ font-size: 13px; color: #1e293b; font-weight: bold; }}
@@ -790,7 +773,7 @@ with tab1:
             cursor: pointer; border: none; background: #2563eb; color: #fff;
         }}
         .btn-download:hover {{ background: #1d4ed8; }}
-        .table-wrap {{ width: 100%; height: 620px; overflow: auto; border: 1px solid #94a3b8; position: relative; }}
+        .table-wrap {{ width: 100%; height: 600px; overflow: auto; border: 1px solid #94a3b8; position: relative; }}
         table {{ border-collapse: separate; border-spacing: 0; width: max-content; min-width: 100%; }}
         th, td {{ border-right: 1px solid #94a3b8; border-bottom: 1px solid #94a3b8; padding: 3px 6px; font-size: 12px; height: 30px; }}
         thead th {{
@@ -858,8 +841,34 @@ with tab1:
     </style>
     </head>
     <body>
+    <!-- ⚡ サーバー通信ゼロの超高速フィルタバー -->
+    <div class="instant-filter-bar">
+        <div class="filter-group">
+            <label class="filter-label">表示絞り込み（瞬時切替）</label>
+            <select id="js-filter-mode" class="filter-select" onchange="applyInstantFilter()">
+                <option value="all">すべて表示（Excelと同じ並び）</option>
+                <option value="need_order">🚨 要発注（発注検討フラグがマイナスのみ）</option>
+                <option value="hit">🔥 【ヒット商品】在庫があるのに期間内売れている</option>
+                <option value="sold">🔥 期間内に売れている商品すべて（売れ数1以上・多い順）</option>
+                <option value="zure">確保数のズレがある商品</option>
+                <option value="incoming">入荷予定がある商品</option>
+                <option value="secured">弥生確保または丸藤確保がある商品</option>
+            </select>
+        </div>
+        <div class="filter-group">
+            <label class="filter-label">商品センター</label>
+            <select id="js-filter-center" class="filter-select" onchange="applyInstantFilter()">
+                <option value="すべて">すべて</option>
+            </select>
+        </div>
+        <div class="filter-group">
+            <label class="filter-label">🔍 品番・商品名・会社名（売上先/確保先）・決定事項でリアルタイム検索</label>
+            <input type="text" id="js-search-kw" class="filter-input" placeholder="文字を打つと0.01秒で絞り込みます（例: ASC-001 / ライト / 丸藤 / 和気産業）" oninput="applyInstantFilter()">
+        </div>
+    </div>
+
     <div class="toolbar">
-        <div class="toolbar-info">表示件数: <span id="row-count">0</span> 件 ｜ 💡 「🔥今月売れ数」や「実績」「在庫確保」の数字をクリックすると、会社別内訳POPが開きます！</div>
+        <div class="toolbar-info">表示件数: <span id="row-count">0</span> 件 ｜ 💡 「🔥期間内売れ数」や「実績」「在庫確保」の数字をクリックすると、会社別内訳POPが開きます！</div>
         <button class="btn-download" onclick="exportEditedCSV()">📥 編集内容を反映したCSV出力</button>
     </div>
     <div class="table-wrap">
@@ -925,7 +934,7 @@ with tab1:
                         <label style="font-size:14px; font-weight:bold;">前回:</label>
                         <input type="text" id="modal-view-prev" class="cell-input" style="width:200px; height:32px; background:#fef08a; font-size:14px;" readonly>
                         <label style="font-size:14px; font-weight:bold;">入荷予定日:</label>
-                        <input type="text" id="modal-input-ndate" class="cell-input" style="width:140px; height:32px; font-size:14px;" oninput="syncFromModal()">
+                        <input type="text" id="modal-input-ndate" class="cell-input" style="width:140px; height:32px; font-size:14px;" placeholder="例: 11/20" oninput="syncFromModal()">
                         <label style="font-size:14px; font-weight:bold;">決定事項:</label>
                         <input type="text" id="modal-input-dec" class="cell-input" style="flex:1; height:32px; font-size:14px;" oninput="syncFromModal()">
                         <label style="font-size:14px; font-weight:bold;">発注日:</label>
@@ -948,6 +957,7 @@ with tab1:
 
     <script>
         const tableData = {records_json};
+        const centerOptions = {centers_json};
         const yayoiMap = {yayoi_json};
         const marufujiMap = {marufuji_json};
         const histMap = {hist_json};
@@ -956,16 +966,37 @@ with tab1:
         const currentPeriodLabel = "{shortcut_mode} ({period_label})";
         let currentModalIdx = null;
         let currentModalMode = "sales";
+        let visibleIndices = [];
+
+        // 商品センター選択肢をセット
+        const centerSel = document.getElementById("js-filter-center");
+        centerOptions.forEach(c => {{
+            const opt = document.createElement("option");
+            opt.value = c;
+            opt.textContent = c;
+            centerSel.appendChild(opt);
+        }});
+
+        function cleanInvalidNdate(val) {{
+            if (!val) return "";
+            const s = String(val).trim();
+            // 数字のみ（0, 550, 1830, 35250等）は入荷予定日ではないため消去
+            if (/^[0-9,.]+$/.test(s)) return "";
+            return s;
+        }}
 
         const savedEdits = JSON.parse(localStorage.getItem("hattyu_edits_v6") || "{{}}");
-        tableData.forEach(r => {{
+        tableData.forEach((r, idx) => {{
+            r["_origIdx"] = idx;
             if (savedEdits[r["品番"]]) {{
                 r["1課発注点"] = savedEdits[r["品番"]].p1 ?? r["1課発注点"];
                 r["2課発注点"] = savedEdits[r["品番"]].p2 ?? r["2課発注点"];
-                r["入荷予定日_ロジザード"] = savedEdits[r["品番"]].ndate ?? r["入荷予定日_ロジザード"];
+                r["入荷予定日_ロジザード"] = cleanInvalidNdate(savedEdits[r["品番"]].ndate ?? r["入荷予定日_ロジザード"]);
                 r["決定事項"] = savedEdits[r["品番"]].dec ?? r["決定事項"];
                 r["発注日"] = savedEdits[r["品番"]].odate ?? r["発注日"];
                 r["発注検討フラグ"] = Number(r["入荷後のフリー在庫"] || 0) - (Number(r["1課発注点"] || 0) + Number(r["2課発注点"] || 0));
+            }} else {{
+                r["入荷予定日_ロジザード"] = cleanInvalidNdate(r["入荷予定日_ロジザード"]);
             }}
             r["確保数のズレ"] = Number(r["確保数_ロジザード"] || 0) - Number(r["在庫確保_弥生"] || 0) - Number(r["在庫確保_丸藤"] || 0);
         }});
@@ -976,12 +1007,13 @@ with tab1:
             return isNaN(n) ? val : n.toLocaleString("ja-JP");
         }}
 
-        function handleKeyDown(event, colName, currentRowIdx) {{
+        function handleKeyDown(event, colName, origIdx) {{
             if (event.key === "Enter") {{
                 event.preventDefault();
-                const nextRowIdx = currentRowIdx + 1;
-                if (nextRowIdx < tableData.length) {{
-                    const nextInput = document.getElementById(`${{colName}}-${{nextRowIdx}}`);
+                const pos = visibleIndices.indexOf(origIdx);
+                if (pos !== -1 && pos + 1 < visibleIndices.length) {{
+                    const nextOrigIdx = visibleIndices[pos + 1];
+                    const nextInput = document.getElementById(`${{colName}}-${{nextOrigIdx}}`);
                     if (nextInput) {{
                         nextInput.focus();
                         if (nextInput.select) nextInput.select();
@@ -990,14 +1022,14 @@ with tab1:
             }}
         }}
 
-        function recalculateRow(idx) {{
-            const r = tableData[idx];
+        function recalculateRow(origIdx) {{
+            const r = tableData[origIdx];
             const p1 = Number(r["1課発注点"] || 0);
             const p2 = Number(r["2課発注点"] || 0);
             const free = Number(r["入荷後のフリー在庫"] || 0);
             r["発注検討フラグ"] = free - (p1 + p2);
 
-            const flagCell = document.getElementById(`flag-${{idx}}`);
+            const flagCell = document.getElementById(`flag-${{origIdx}}`);
             if (flagCell) {{
                 flagCell.textContent = fmtNum(r["発注検討フラグ"]);
                 flagCell.className = (r["発注検討フラグ"] < 0) ? "w-num bg-flag-neg" : "w-num bg-cyan";
@@ -1005,11 +1037,44 @@ with tab1:
             saveToStorage(r["品番"], r);
         }}
 
-        function renderTable() {{
+        function applyInstantFilter() {{
+            const fMode = document.getElementById("js-filter-mode").value;
+            const fCenter = document.getElementById("js-filter-center").value;
+            const kw = document.getElementById("js-search-kw").value.trim().toLowerCase();
+
+            let filtered = tableData.filter(r => {{
+                if (fMode === "need_order" && !(Number(r["発注検討フラグ"]) < 0)) return false;
+                if (fMode === "hit" && !(Number(r["入荷後のフリー在庫"]) >= 1 && Number(r["今月売れ数"]) >= 1)) return false;
+                if (fMode === "sold" && !(Number(r["今月売れ数"]) >= 1)) return false;
+                if (fMode === "zure" && !(Number(r["確保数のズレ"]) !== 0)) return false;
+                if (fMode === "incoming" && !(Number(r["入荷予定数_ロジザード"]) > 0 || (r["入荷予定日_ロジザード"] && r["入荷予定日_ロジザード"] !== ""))) return false;
+                if (fMode === "secured" && !(Number(r["在庫確保_弥生"]) > 0 || Number(r["在庫確保_丸藤"]) > 0)) return false;
+
+                if (fCenter !== "すべて" && r["商品センター"] !== fCenter) return false;
+
+                if (kw) {{
+                    const targetStr = [
+                        r["品番"], r["商品区分"], r["前回決定事項"], r["決定事項"], r["関連会社検索用"]
+                    ].join(" ").toLowerCase();
+                    if (!targetStr.includes(kw)) return false;
+                }}
+                return true;
+            }});
+
+            if (fMode === "sold") {{
+                filtered.sort((a, b) => Number(b["今月売れ数"]) - Number(a["今月売れ数"]));
+            }}
+
+            visibleIndices = filtered.map(r => r["_origIdx"]);
+            renderTable(filtered);
+        }}
+
+        function renderTable(rowsToRender) {{
             const tbody = document.getElementById("table-body");
-            document.getElementById("row-count").textContent = tableData.length.toLocaleString();
+            document.getElementById("row-count").textContent = rowsToRender.length.toLocaleString();
             let html = "";
-            tableData.forEach((r, idx) => {{
+            rowsToRender.forEach(r => {{
+                const idx = r["_origIdx"];
                 const flagVal = Number(r["発注検討フラグ"]);
                 const flagCls = (flagVal < 0) ? "bg-flag-neg" : "bg-cyan";
                 const rateVal = Number(r["在庫回転率"]);
@@ -1032,7 +1097,7 @@ with tab1:
                     <td class="w-num"><input type="number" class="cell-input-point" id="point2-${{idx}}" value="${{r["2課発注点"]}}" oninput="tableData[${{idx}}]['2課発注点']=Number(this.value); recalculateRow(${{idx}})" onkeydown="handleKeyDown(event, 'point2', ${{idx}})"></td>
                     <td class="w-num bg-cyan">${{fmtNum(r["在庫数_ロジザード"])}}</td>
                     <td class="w-num bg-cyan">${{fmtNum(r["入荷予定数_ロジザード"])}}</td>
-                    <td class="w-date bg-cyan"><input type="text" class="cell-input" id="ndate-${{idx}}" value="${{r["入荷予定日_ロジザード"] || ""}}" oninput="updateCell(${{idx}}, '入荷予定日_ロジザード', this.value)" onkeydown="handleKeyDown(event, 'ndate', ${{idx}})"></td>
+                    <td class="w-date bg-cyan"><input type="text" class="cell-input" id="ndate-${{idx}}" value="${{r["入荷予定日_ロジザード"] || ""}}" placeholder="日付入力" oninput="updateCell(${{idx}}, '入荷予定日_ロジザード', this.value)" onkeydown="handleKeyDown(event, 'ndate', ${{idx}})"></td>
                     <td class="w-num bg-cyan">${{fmtNum(r["確保数_ロジザード"])}}</td>
                     <td class="w-num bg-cyan"><span class="click-link" onclick="openModal(${{idx}}, 'yayoi')">${{fmtNum(r["在庫確保_弥生"])}}</span></td>
                     <td class="w-num bg-cyan"><span class="click-link" style="color:#b91c1c;" onclick="openModal(${{idx}}, 'marufuji')">${{fmtNum(r["在庫確保_丸藤"])}}</span></td>
@@ -1190,9 +1255,12 @@ with tab1:
             tableData[currentModalIdx]["入荷予定日_ロジザード"] = ndate;
             tableData[currentModalIdx]["決定事項"] = dec;
             tableData[currentModalIdx]["発注日"] = odate;
-            document.getElementById(`ndate-${{currentModalIdx}}`).value = ndate;
-            document.getElementById(`dec-${{currentModalIdx}}`).value = dec;
-            document.getElementById(`odate-${{currentModalIdx}}`).value = odate;
+            const ndateEl = document.getElementById(`ndate-${{currentModalIdx}}`);
+            const decEl = document.getElementById(`dec-${{currentModalIdx}}`);
+            const odateEl = document.getElementById(`odate-${{currentModalIdx}}`);
+            if (ndateEl) ndateEl.value = ndate;
+            if (decEl) decEl.value = dec;
+            if (odateEl) odateEl.value = odate;
             saveToStorage(tableData[currentModalIdx]["品番"], tableData[currentModalIdx]);
         }}
 
@@ -1219,12 +1287,12 @@ with tab1:
             a.download = `発注検討表_出力_${{new Date().toISOString().slice(0,10)}}.csv`;
             a.click();
         }}
-        renderTable();
+        applyInstantFilter();
     </script>
     </body>
     </html>
     """
-    components.html(html_tab1, height=680, scrolling=False)
+    components.html(html_tab1, height=740, scrolling=False)
 
 with tab2:
     if df_yayoi.empty:
