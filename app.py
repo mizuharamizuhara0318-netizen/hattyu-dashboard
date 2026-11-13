@@ -978,23 +978,11 @@ def load_excel_master(file_source):
                 c_n = normalize_code(vals[13])
                 sheet_yayoi_sum[c_n] = sheet_yayoi_sum.get(c_n, 0) + int(to_num(vals[14]))
 
-    # 発注検討表内の total シート（前期77期の売上高・平均単価・原価のフォールバック用）
+    # ★ 発注検討表-修正.xlsx 内の total シートからは金額・単価・原価を一切引っ張らない（異常値混入防止）
     latest_ship_map = {}
     tot_cost_fallback = {}
     tot_avg_price_map = {}
     tot_sales_amt_map = {}
-    for sname in all_sheets:
-        if "total" in str(sname).lower():
-            df_tot = all_sheets[sname]
-            for _, rt in df_tot.iloc[1:].iterrows():
-                vals = rt.values
-                if len(vals) > 8 and clean_str(vals[1]):
-                    c_n = normalize_code(vals[1])
-                    if c_n not in latest_ship_map:
-                        latest_ship_map[c_n] = int(to_num(vals[5]))
-                        tot_cost_fallback[c_n] = to_num(vals[3])
-                        tot_avg_price_map[c_n] = to_num(vals[4])
-                        tot_sales_amt_map[c_n] = int(to_num(vals[6]))
 
     header_idx = 0
     for idx in range(min(15, len(target_df))):
@@ -1424,72 +1412,63 @@ df_main["今期出荷"] = df_main["品番_正規化"].map(konki_qty_map).fillna(
 df_main["先週売数"] = df_main["品番_正規化"].map(prev_w_qty_map).fillna(0).astype(int)
 df_main["今週売数"] = df_main["品番_正規化"].map(this_w_qty_map).fillna(0).astype(int)
 
-# 4. 『新原価』シート最優先で原価・売上高・粗利額・粗利率・在庫金額・4種バッジを算出
-tot_cost_fb = extra_meta.get("tot_cost_fallback", {})
-tot_avg_p = extra_meta.get("tot_avg_price_map", {})
-tot_amt_fb = extra_meta.get("tot_sales_amt_map", {})
-
+# 4. 『order_r（マスター）.xlsx』の「新原価」「item」と『yayoi_CSV』だけで売上高・粗利額・粗利率を算出
 new_costs, min_gedais, avg_prices, sales_amts, gross_profits, margin_rates, stock_vals = [], [], [], [], [], [], []
 is_new_list, is_surge_list, is_dead_list = [], [], []
 
 for _, r in df_main.iterrows():
     cn = r["品番_正規化"]
-    # ① 原価は order_r（マスター）.xlsx の『新原価』シートを最優先取得
-    u_cost = float(cost_map.get(cn, tot_cost_fb.get(cn, 0.0)))
-
-    # ② 基準となる下代・販売価格（order_rのitem販売価格 または 新原価シートの最低下代）
+    # ① 原価・下代は 100%『order_r（マスター）.xlsx』の「新原価」「item」シートからのみ取得！
+    u_cost = float(cost_map.get(cn, 0.0))
     raw_gedai = float(gedai_map.get(cn, 0.0))
     raw_std_p = float(std_price_map.get(cn, 0.0))
-    u_gedai = raw_std_p if (0 < raw_std_p < 90000) else (raw_gedai if (0 < raw_gedai < 90000) else 0.0)
 
-    # ③ 実売平均単価の決定（原価割れや0円の異常値を除外し、確実に原価以上の単価を採用）
+    # 標準下代（最低下代または販売価格のうち、99999などのダミー値を除いた有効値）
+    if 0 < raw_gedai < 90000:
+        u_gedai = raw_gedai
+    elif 0 < raw_std_p < 90000:
+        u_gedai = raw_std_p
+    else:
+        u_gedai = round(u_cost / 0.65, 0) if u_cost > 0 else 0.0
+
+    # ② 今期売上（yayoi_CSV）の個数と金額
     konki_q = int(r["今期出荷"])
     k77_q = int(r["77期"])
-    active_q = konki_q if konki_q > 0 else k77_q
-
     csv_amt = float(konki_amt_map.get(cn, 0.0))
     csv_unit_p = (csv_amt / konki_q) if (konki_q > 0 and csv_amt > 0) else 0.0
-    tot_unit_p = float(tot_avg_p.get(cn, 0.0))
 
-    # 優先順位: 1.今期CSV実売単価(原価超) -> 2.totalシート平均単価(原価超) -> 3.order_rの販売価格/最低下代(原価超) -> 4.原価÷0.65(標準粗利率35%換算)
+    # 単価の決定：yayoi_CSVの実売単価が原価より上なら実売単価、そうでなければorder_rの下代を採用
     if csv_unit_p > u_cost and u_cost > 0:
         u_avg_p = csv_unit_p
-    elif tot_unit_p > u_cost and u_cost > 0:
-        u_avg_p = tot_unit_p
     elif u_gedai > u_cost and u_cost > 0:
         u_avg_p = u_gedai
     elif u_cost > 0:
         u_avg_p = round(u_cost / 0.65, 0)
     else:
-        u_avg_p = csv_unit_p or tot_unit_p or u_gedai or 0.0
+        u_avg_p = csv_unit_p or u_gedai or 0.0
 
-    if u_gedai <= 0 and u_avg_p > 0:
-        u_gedai = u_avg_p
-
-    # ④ 売上高・粗利額・粗利率の計算（個数×単価で一貫計算するためマイナスにならない）
+    # ③ 今期出荷（yayoi_CSV）をベースに売上高・粗利額を計算（今期0個の場合は77期個数×order_r下代で参考算出）
+    active_q = konki_q if konki_q > 0 else k77_q
     if active_q > 0 and u_avg_p > 0:
         s_amt = int(round(active_q * u_avg_p))
-        g_profit = int(round(s_amt - (active_q * u_cost))) if u_cost > 0 else int(round(s_amt * 0.35))
+        g_profit = int(round(s_amt - (active_q * u_cost))) if u_cost > 0 else 0
+        if g_profit < 0:
+            # 万が一、下代設定自体が原価より低い特売品でもマイナス表示にならないよう実態に合わせる
+            g_profit = 0
         m_rate = round((g_profit / s_amt) * 100, 1) if s_amt > 0 else 0.0
     else:
         s_amt = 0
         g_profit = 0
-        # 今期・前期の出荷が0個でも、原価と下代から「想定粗利率」を表示
-        if u_avg_p > u_cost and u_cost > 0:
-            m_rate = round(((u_avg_p - u_cost) / u_avg_p) * 100, 1)
-        else:
-            m_rate = 0.0
+        m_rate = round(((u_avg_p - u_cost) / u_avg_p) * 100, 1) if (u_avg_p > u_cost and u_cost > 0) else 0.0
 
     st_val = int(round(max(int(r["在庫数_ロジザード"]), 0) * u_cost))
 
-    # 🆕 新商品判定（74期・75期が0で、76期以降に登場した商品）
+    # 🆕 新商品 ／ ⚡ 急増 ／ ❄️ 滞留 の判定
     is_new = (int(r["74期"]) == 0 and int(r["75期"]) == 0 and (int(r["76期"]) > 0 or k77_q > 0 or konki_q > 0))
-    # ⚡ 急増トレンド判定
     avg_weekly = max(k77_q / 52.0, 10.0)
     w_this = int(r["今週売数"])
     w_prev = int(r["先週売数"])
     is_surge = (w_this >= 30 and w_this >= max(w_prev * 1.5, avg_weekly * 1.8))
-    # ❄️ 滞留（デッドストック）判定
     is_dead = ((int(r["入荷後のフリー在庫"]) >= 1000 or st_val >= 300000) and int(r["在庫回転率"]) <= 15 and w_this == 0)
 
     new_costs.append(int(round(u_cost)))
