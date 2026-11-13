@@ -4,7 +4,6 @@ import pandas as pd
 import openpyxl
 import datetime
 import os
-import glob
 import json
 import zipfile
 import io
@@ -12,9 +11,8 @@ import time
 import re
 import math
 import urllib.request
-from supabase import create_client, Client
 
-st.set_page_config(page_title="発注検討表 ＆ 弥生受注管理システム（Supabase＆GDrive連動版）", layout="wide")
+st.set_page_config(page_title="発注検討表 ＆ 弥生受注管理システム（Googleドライブ完全連動版）", layout="wide")
 
 st.markdown("""
 <style>
@@ -38,61 +36,13 @@ st.markdown("""
         padding-bottom: 4px;
         border-bottom: 3px solid #2563eb;
     }
-    .filter-box {
-        background: #f8fafc;
-        border: 1px solid #cbd5e1;
-        padding: 10px 16px;
-        border-radius: 8px;
-        margin-bottom: 10px;
-    }
 </style>
 """, unsafe_allow_html=True)
 
-SUPABASE_URL = "https://zyeemvbskaefbtfxurdw.supabase.co"
-SUPABASE_KEY = "sb_publishable_S19HrcRBy63BGNbsSq69Xg_pZ05d3Z3"
-
-# ご提示いただいたGoogleドライブの発注検討表リンクから自動取得するための設定
+# ご提示いただいたGoogleドライブの発注検討表リンク
 GDRIVE_ORDER_URL = "https://docs.google.com/spreadsheets/d/1JequkGmSRMwoo9rK5HAodfnY6foXl-F2/edit?usp=drive_link"
 
-@st.cache_resource
-def init_supabase():
-    try:
-        return create_client(SUPABASE_URL, SUPABASE_KEY)
-    except Exception:
-        return None
-
-supabase = init_supabase()
-
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in locals() else "."
-
-SEARCH_DIRS = [
-    SCRIPT_DIR,
-    ".",
-    r"G:\マイドライブ\発注検討",
-    r"G:\マイドライブ\売上ダッシュボード\済",
-    r"G:\マイドライブ\売上ダッシュボード",
-    "/content/drive/MyDrive/発注検討",
-    "/content/drive/MyDrive/売上ダッシュボード/済"
-]
-
-def find_target_file(keywords, ext=".xlsx"):
-    for d in SEARCH_DIRS:
-        if os.path.exists(d):
-            try:
-                for fn in os.listdir(d):
-                    if fn.lower().endswith(ext) and not fn.startswith("~$"):
-                        if any(k in fn for k in keywords):
-                            return os.path.join(d, fn)
-            except Exception:
-                pass
-    return None
-
-MAIN_EXCEL = find_target_file(["発注検討表"])
-YAYOI_EXCEL = find_target_file(["弥生確保リスト", "確保リスト"])
-YAYOI_ITEM_EXCEL = find_target_file(["弥生商品番号", "商品番号"])
-YAYOI_COMP_EXCEL = find_target_file(["弥生会社名", "会社名", "得意先"])
-
-SAVE_CSV = os.path.join(SCRIPT_DIR, "meeting_decisions_v8.csv")
 MANUAL_YAYOI_CSV = os.path.join(SCRIPT_DIR, "yayoi_manual_additions.csv")
 
 STAFF_OPTIONS_CLEAN = ["", "小泉", "鈴木", "松平", "原", "西山", "田中", "水原", "川村", "穴山"]
@@ -145,12 +95,8 @@ def to_num(val):
         return 0.0
 
 def is_future_delivery(ddate_str, note_str, ref_date=None):
-    """
-    納期（納入期日または備考欄）から『将来確保（2ヶ月先以降）』か『直近確保』かを自動判定する関数
-    """
     if ref_date is None:
         ref_date = datetime.date.today()
-    # 1. 納入期日が2ヶ月（45日）以上先なら「将来」
     if ddate_str:
         try:
             dt = pd.to_datetime(ddate_str, errors="coerce")
@@ -158,13 +104,11 @@ def is_future_delivery(ddate_str, note_str, ref_date=None):
                 return True
         except Exception:
             pass
-    # 2. 備考欄に「12月」「1月」「2月」「3月」など翌月以降の月指定があるかを判定
     s = str(note_str or "")
     m_matches = re.findall(r'(\d{1,2})月', s)
     if m_matches:
         cur_m = ref_date.month
         next_m = (cur_m % 12) + 1
-        # 当月・翌月以外の月（例: 10月時点で12月, 1月, 2月など）が含まれていれば将来分と判定
         for m_str in m_matches:
             m = int(m_str)
             if 1 <= m <= 12 and m not in (cur_m, next_m):
@@ -174,10 +118,155 @@ def is_future_delivery(ddate_str, note_str, ref_date=None):
     return False
 
 # =========================================================
-# Googleドライブ ＆ Excelフィルター修復・読み込み処理
+# Googleドライブ接続・ファイル自動取得処理
 # =========================================================
+def get_gdrive_service():
+    """StreamlitのSecretsからサービスアカウント認証情報を自動検出してGoogle Drive APIを初期化"""
+    try:
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+        creds_info = None
+        if "gcp_service_account" in st.secrets:
+            creds_info = dict(st.secrets["gcp_service_account"])
+        elif "google_service_account" in st.secrets:
+            creds_info = dict(st.secrets["google_service_account"])
+        elif "private_key" in st.secrets and "client_email" in st.secrets:
+            creds_info = dict(st.secrets)
+        else:
+            for k in st.secrets:
+                val = st.secrets[k]
+                if hasattr(val, "keys") and "private_key" in val:
+                    creds_info = dict(val)
+                    break
+                elif isinstance(val, str) and "private_key" in val:
+                    try:
+                        creds_info = json.loads(val)
+                        break
+                    except Exception:
+                        pass
+        if creds_info:
+            creds = service_account.Credentials.from_service_account_info(
+                creds_info, scopes=["https://www.googleapis.com/auth/drive.readonly"]
+            )
+            return build("drive", "v3", credentials=creds)
+    except Exception:
+        pass
+    return None
+
+def download_file_by_id(service, file_id: str):
+    """Google Drive API または 公開URL から指定ファイルIDのバイナリを取得"""
+    # 1. Google Drive API経由
+    if service is not None:
+        from googleapiclient.http import MediaIoBaseDownload
+        try:
+            req = service.files().get_media(fileId=file_id, supportsAllDrives=True)
+            fh = io.BytesIO()
+            downloader = MediaIoBaseDownload(fh, req)
+            done = False
+            while not done:
+                _, done = downloader.next_chunk()
+            if len(fh.getvalue()) > 500:
+                return fh.getvalue(), "Google Drive API (サービスアカウント認証)"
+        except Exception:
+            try:
+                req = service.files().export_media(
+                    fileId=file_id,
+                    mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+                fh = io.BytesIO()
+                downloader = MediaIoBaseDownload(fh, req)
+                done = False
+                while not done:
+                    _, done = downloader.next_chunk()
+                if len(fh.getvalue()) > 500:
+                    return fh.getvalue(), "Google Drive API (スプレッドシート変換)"
+            except Exception:
+                pass
+
+    # 2. リンク共有経由（リンクを知っている全員が閲覧可の場合）
+    dl_urls = [
+        f"https://docs.google.com/spreadsheets/d/{file_id}/export?format=xlsx",
+        f"https://drive.google.com/uc?export=download&id={file_id}",
+        f"https://drive.usercontent.google.com/download?id={file_id}&export=download&confirm=t"
+    ]
+    for u in dl_urls:
+        try:
+            req = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                data = resp.read()
+                # ZIP(xlsx)シグネチャ 'PK' の確認（ログインHTML画面を誤って読まないようにする）
+                if len(data) > 1000 and data[:2] == b'PK':
+                    return data, "Googleドライブ共有リンク"
+        except Exception:
+            continue
+    return None, None
+
+@st.cache_data(ttl=3600, show_spinner="☁️ Googleドライブから最新データを同期中...")
+def sync_all_files_from_gdrive(drive_url: str):
+    m = re.search(r'/d/([a-zA-Z0-9_-]+)', drive_url)
+    target_id = m.group(1) if m else ""
+    service = get_gdrive_service()
+
+    result = {
+        "main_bytes": None,
+        "yayoi_bytes": None,
+        "comp_bytes": None,
+        "item_bytes": None,
+        "source_label": "",
+        "error_detail": ""
+    }
+
+    if target_id:
+        b_main, src_lbl = download_file_by_id(service, target_id)
+        if b_main:
+            result["main_bytes"] = b_main
+            result["source_label"] = src_lbl
+        else:
+            has_secret = "設定あり" if service is not None else "未設定"
+            result["error_detail"] = (
+                f"Googleドライブのファイル(ID: {target_id})にアクセスできませんでした。（Secrets認証: {has_secret}）\n"
+                "👉 解決策: Googleドライブで『発注検討表』を右クリック ＞「共有」＞ 一般的なアクセスを『リンクを知っている全員』に変更するか、"
+                "サービスアカウント(id-840@asahi-dashboard-514301.iam.gserviceaccount.com)に共有してSecretsを設定してください。"
+            )
+
+    # サービスアカウントが有効な場合、Googleドライブ内の『弥生確保リスト』『弥生会社名』『弥生商品番号』も自動検索して同期
+    if service is not None:
+        try:
+            q = "trashed = false and (name contains '発注検討表' or name contains '弥生確保' or name contains '確保リスト' or name contains '弥生会社名' or name contains '弥生商品番号')"
+            res = service.files().list(q=q, pageSize=30, fields="files(id, name, modifiedTime)", orderBy="modifiedTime desc", supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
+            for f in res.get("files", []):
+                fname = f["name"]
+                fid = f["id"]
+                if result["main_bytes"] is None and "発注検討表" in fname:
+                    b, lbl = download_file_by_id(service, fid)
+                    if b:
+                        result["main_bytes"] = b
+                        result["source_label"] = lbl
+                elif result["yayoi_bytes"] is None and ("弥生確保" in fname or "確保リスト" in fname):
+                    b, _ = download_file_by_id(service, fid)
+                    if b:
+                        result["yayoi_bytes"] = b
+                elif result["comp_bytes"] is None and ("弥生会社名" in fname or "得意先" in fname):
+                    b, _ = download_file_by_id(service, fid)
+                    if b:
+                        result["comp_bytes"] = b
+                elif result["item_bytes"] is None and ("弥生商品番号" in fname or "商品番号" in fname):
+                    b, _ = download_file_by_id(service, fid)
+                    if b:
+                        result["item_bytes"] = b
+        except Exception:
+            pass
+
+    return result
+
+def find_local_file(keywords, ext=".xlsx"):
+    for fn in os.listdir(SCRIPT_DIR):
+        if fn.lower().endswith(ext) and not fn.startswith("~$"):
+            if any(k in fn for k in keywords):
+                return os.path.join(SCRIPT_DIR, fn)
+    return None
+
 def fix_corrupted_xlsx_filters(xlsx_bytes: bytes) -> io.BytesIO:
-    """Excel内の古いautoFilter属性によるopenpyxlのValueErrorをメモリ上で自動修復"""
     in_mem = io.BytesIO(xlsx_bytes)
     out_mem = io.BytesIO()
     try:
@@ -195,71 +284,16 @@ def fix_corrupted_xlsx_filters(xlsx_bytes: bytes) -> io.BytesIO:
         in_mem.seek(0)
         return in_mem
 
-@st.cache_data(ttl=3600, show_spinner="☁️ Googleドライブから最新の発注検討表を取得中...")
-def fetch_excel_bytes_from_gdrive(drive_url: str):
-    m = re.search(r'/d/([a-zA-Z0-9_-]+)', drive_url)
-    if not m:
-        return None
-    target_id = m.group(1)
-
-    # 方法1: Streamlit SecretsにGoogle Cloudサービスアカウントがある場合はAPI経由で取得
-    if "gcp_service_account" in st.secrets:
-        try:
-            from google.oauth2 import service_account
-            from googleapiclient.discovery import build
-            from googleapiclient.http import MediaIoBaseDownload
-            creds = service_account.Credentials.from_service_account_info(
-                st.secrets["gcp_service_account"],
-                scopes=["https://www.googleapis.com/auth/drive.readonly"]
-            )
-            service = build("drive", "v3", credentials=creds)
-            try:
-                req = service.files().get_media(fileId=target_id)
-                fh = io.BytesIO()
-                downloader = MediaIoBaseDownload(fh, req)
-                done = False
-                while not done:
-                    _, done = downloader.next_chunk()
-                return fh.getvalue()
-            except Exception:
-                req = service.files().export_media(
-                    fileId=target_id,
-                    mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-                fh = io.BytesIO()
-                downloader = MediaIoBaseDownload(fh, req)
-                done = False
-                while not done:
-                    _, done = downloader.next_chunk()
-                return fh.getvalue()
-        except Exception:
-            pass
-
-    # 方法2: 共有リンクから直接ダウンロード
-    dl_urls = [
-        f"https://docs.google.com/spreadsheets/d/{target_id}/export?format=xlsx",
-        f"https://drive.google.com/uc?export=download&id={target_id}"
-    ]
-    for u in dl_urls:
-        try:
-            req = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                data = resp.read()
-                if len(data) > 1000 and data[:2] == b'PK':
-                    return data
-        except Exception:
-            continue
-    return None
-
 @st.cache_data
-def load_company_master(file_source):
+def load_company_master(file_bytes_or_path):
     loaded = []
     seen = set()
-    sources = [file_source, YAYOI_COMP_EXCEL, "弥生会社名.xlsx", r"G:\マイドライブ\発注検討\弥生会社名.xlsx"]
+    sources = [file_bytes_or_path, find_local_file(["弥生会社名", "会社名", "得意先"])]
     for src in sources:
-        if src and ( hasattr(src, "read") or os.path.exists(str(src)) ):
+        if src is not None:
             try:
-                df_c = pd.read_excel(src, sheet_name=0, header=None)
+                src_io = io.BytesIO(src) if isinstance(src, bytes) else src
+                df_c = pd.read_excel(src_io, sheet_name=0, header=None)
                 for idx in range(len(df_c)):
                     r = df_c.iloc[idx].values
                     if len(r) < 3:
@@ -278,14 +312,15 @@ def load_company_master(file_source):
     return loaded
 
 @st.cache_data
-def load_item_master(file_source):
+def load_item_master(file_bytes_or_path):
     loaded = []
     seen = set()
-    sources = [file_source, YAYOI_ITEM_EXCEL, "弥生商品番号.xlsx", r"G:\マイドライブ\発注検討\弥生商品番号.xlsx"]
+    sources = [file_bytes_or_path, find_local_file(["弥生商品番号", "商品番号"])]
     for src in sources:
-        if src and ( hasattr(src, "read") or os.path.exists(str(src)) ):
+        if src is not None:
             try:
-                df_i = pd.read_excel(src, sheet_name=0, header=None)
+                src_io = io.BytesIO(src) if isinstance(src, bytes) else src
+                df_i = pd.read_excel(src_io, sheet_name=0, header=None)
                 for idx in range(len(df_i)):
                     r = df_i.iloc[idx].values
                     if len(r) < 3:
@@ -317,7 +352,7 @@ def load_excel_master(file_source):
                 raw_bytes = f.read()
 
     if raw_bytes is None:
-        return pd.DataFrame(), pd.DataFrame(), "前回決定事項", {}, {}
+        return pd.DataFrame(), pd.DataFrame(), "前回決定事項", {}, "", {}
 
     clean_io = fix_corrupted_xlsx_filters(raw_bytes)
     all_sheets = {}
@@ -332,9 +367,9 @@ def load_excel_master(file_source):
                 all_sheets[sname] = pd.DataFrame(list(ws.iter_rows(values_only=True)))
         except Exception as ex:
             st.error(f"発注検討表の読み込みエラー: {ex}")
-            return pd.DataFrame(), pd.DataFrame(), "前回決定事項", {}, {}
+            return pd.DataFrame(), pd.DataFrame(), "前回決定事項", {}, "", {}
 
-    # ★重要改善: 一番左の古いシートではなく『マスター (新) (3)』または最新の週次シートを優先取得
+    # 『マスター (新) (3)』または最新のシートを自動選択
     target_sheet_name = list(all_sheets.keys())[0]
     if "マスター (新) (3)" in all_sheets:
         target_sheet_name = "マスター (新) (3)"
@@ -345,7 +380,7 @@ def load_excel_master(file_source):
                 break
     target_df = all_sheets[target_sheet_name]
 
-    # ★重要改善: 『在庫貼り付け』『入荷予定貼り付け』『確保貼り付け』『商品一覧表 (3)』からSUMIFS合算辞書を作成
+    # 貼り付けシートのSUMIFS合算辞書を作成
     z_free_sum = {}
     z_sec_sum = {}
     if "在庫貼り付け" in all_sheets:
@@ -382,21 +417,29 @@ def load_excel_master(file_source):
                 if clean_str(vals[4]):
                     prod_name_sheet_map[c_n] = clean_str(vals[4])
 
-    # 『確保貼り付け』シートの合算（SUMIFS相当：複数行に分かれた丸藤様データ等も漏れなく合算）
     sheet_yayoi_sum = {}
     sheet_maru_sum = {}
     if "確保貼り付け" in all_sheets:
         df_k = all_sheets["確保貼り付け"].iloc[4:]
         for _, rk in df_k.iterrows():
             vals = rk.values
-            # N列(13)=行ラベル, O列(14)=合計/受注残数
             if len(vals) > 14 and clean_str(vals[13]) and clean_str(vals[13]) not in ("行ラベル", "総計", "(空白)"):
                 c_n = normalize_code(vals[13])
                 sheet_yayoi_sum[c_n] = sheet_yayoi_sum.get(c_n, 0) + int(to_num(vals[14]))
-            # J列(9)=丸藤商品コード, L列(11)=受注残数
             if len(vals) > 11 and clean_str(vals[9]) and clean_str(vals[9]) != "商品コード":
                 c_n2 = normalize_code(vals[9])
                 sheet_maru_sum[c_n2] = sheet_maru_sum.get(c_n2, 0) + int(to_num(vals[11]))
+
+    # Excel内の最新出荷集計シート（total260724...等）があれば77期（当期出荷数）も取得
+    latest_ship_map = {}
+    for sname in all_sheets:
+        if "total" in str(sname).lower():
+            df_tot = all_sheets[sname]
+            for _, rt in df_tot.iterrows():
+                vals = rt.values
+                if len(vals) > 5 and clean_str(vals[1]):
+                    c_n = normalize_code(vals[1])
+                    latest_ship_map[c_n] = int(to_num(vals[5]))
 
     header_idx = 0
     for idx in range(min(15, len(target_df))):
@@ -435,13 +478,13 @@ def load_excel_master(file_source):
     c_k74 = col_map.get("k74", 7)
     c_k75 = col_map.get("k75", 9)
     c_k76 = col_map.get("k76", 10)
+    c_k77 = col_map.get("k77", 11)
     c_point1 = col_map.get("point1", 14)
     c_point2 = col_map.get("point2", -1)
     c_roji_stock = col_map.get("roji_stock", 16)
     c_roji_in = col_map.get("roji_in", 17)
     c_ndate = col_map.get("ndate", -1)
     c_roji_sec = col_map.get("roji_sec", 19)
-    c_free = col_map.get("free", 24)
     c_rate = col_map.get("rate", 26)
     c_rin = col_map.get("rinbell", 27)
     c_prev = col_map.get("prev_dec", 28)
@@ -460,10 +503,10 @@ def load_excel_master(file_source):
             continue
         c_norm = normalize_code(hinban)
 
-        p1_val = int(round(to_num(r[c_point1]), 0)) if c_point1 < len(r) and not is_na_val(r[c_point1]) else 0
+        k77_val = int(to_num(r[c_k77])) if c_k77 < len(r) and not is_na_val(r[c_k77]) else latest_ship_map.get(c_norm, 0)
+        p1_val = int(round(to_num(r[c_point1]), 0)) if c_point1 < len(r) and not is_na_val(r[c_point1]) else int(round(k77_val / 12 * 5, 0))
         p2_val = int(round(to_num(r[c_point2]), 0)) if 0 <= c_point2 < len(r) and not is_na_val(r[c_point2]) else 0
 
-        # ロジザード在庫・入荷予定・ロジ確保は貼り付けシートがあればSUMIFS合算値を優先適用
         stock_roji = z_free_sum.get(c_norm, int(to_num(r[c_roji_stock])) if c_roji_stock < len(r) else 0)
         in_roji = nyuka_sum.get(c_norm, int(to_num(r[c_roji_in])) if c_roji_in < len(r) else 0)
         sec_roji_cell = int(to_num(r[c_roji_sec])) if c_roji_sec < len(r) else 0
@@ -472,7 +515,6 @@ def load_excel_master(file_source):
         y_sec_init = sheet_yayoi_sum.get(c_norm, 0)
         m_sec_init = sheet_maru_sum.get(c_norm, 0)
 
-        # 有効在庫（フリー在庫）の算出
         free_val = (stock_roji + sec_roji + in_roji) - (y_sec_init + m_sec_init)
         flag_val = free_val - (p1_val + p2_val)
 
@@ -491,6 +533,7 @@ def load_excel_master(file_source):
             "74期": int(to_num(r[c_k74])) if c_k74 < len(r) else 0,
             "75期": int(to_num(r[c_k75])) if c_k75 < len(r) else 0,
             "76期": int(to_num(r[c_k76])) if c_k76 < len(r) else 0,
+            "77期": k77_val,
             "1課発注点": p1_val,
             "2課発注点": p2_val,
             "在庫数_ロジザード": stock_roji,
@@ -511,8 +554,7 @@ def load_excel_master(file_source):
             "前回決定事項": clean_str(r[c_prev]) if c_prev < len(r) else "",
             "決定事項": clean_str(r[c_curr]) if c_curr < len(r) else "",
             "発注日": "",
-            "関連会社検索用": "",
-            "NA行": False
+            "関連会社検索用": ""
         })
 
     df_main = pd.DataFrame(items)
@@ -547,23 +589,25 @@ def load_excel_master(file_source):
         "sheet_yayoi_sum": sheet_yayoi_sum,
         "sheet_maru_sum": sheet_maru_sum
     }
-    return df_main, df_hist, prev_col_title, extra_meta, all_sheets
+    return df_main, df_hist, prev_col_title, extra_meta, target_sheet_name, all_sheets
 
 @st.cache_data
-def load_yayoi_data(file_source):
+def load_yayoi_data(file_bytes_or_path, all_sheets_from_main=None):
     df = pd.DataFrame()
-    sources = [file_source, YAYOI_EXCEL, "弥生確保リスト.xlsx", r"G:\マイドライブ\発注検討\弥生確保リスト.xlsx"]
+    sources = [file_bytes_or_path, find_local_file(["弥生確保リスト", "確保リスト"])]
     for src in sources:
-        if src and ( hasattr(src, "read") or os.path.exists(str(src)) ):
+        if src is not None:
             try:
-                df_raw = pd.read_excel(src, sheet_name=0, header=None)
+                src_io = io.BytesIO(src) if isinstance(src, bytes) else src
+                df_raw = pd.read_excel(src_io, sheet_name=0, header=None)
                 h_idx = 4
                 for i in range(min(15, len(df_raw))):
                     row_v = [clean_str(x) for x in df_raw.iloc[i].values]
                     if "商品コード" in row_v or "得意先名" in row_v:
                         h_idx = i
                         break
-                df = pd.read_excel(src, sheet_name=0, header=h_idx)
+                src_io2 = io.BytesIO(src) if isinstance(src, bytes) else src
+                df = pd.read_excel(src_io2, sheet_name=0, header=h_idx)
                 if not df.empty and ("商品コード" in df.columns or len(df.columns) > 21):
                     break
             except Exception:
@@ -601,7 +645,47 @@ def load_yayoi_data(file_source):
                 lambda r: f"Y-{r['受注日'].replace('-','')}-{abs(hash(r['得意先名']))%10000:04d}", axis=1
             )
     else:
-        df = pd.DataFrame(columns=["受注番号", "得意先名", "商品コード", "数量", "受注残数", "受注日", "納入期日", "備考", "倉庫名", "担当者名", "受注日_dt", "納入期日_dt"])
+        # 『弥生確保リスト.xlsx』が別ファイルとして無い場合は、発注検討表内の『確保貼り付け』シートから明細を生成
+        fallback_rows = []
+        if all_sheets_from_main and "確保貼り付け" in all_sheets_from_main:
+            df_k = all_sheets_from_main["確保貼り付け"].iloc[4:]
+            for idx_k, rk in df_k.iterrows():
+                vals = rk.values
+                if len(vals) > 11 and clean_str(vals[9]) and clean_str(vals[9]) != "商品コード":
+                    fallback_rows.append({
+                        "受注番号": f"MARU-{idx_k:04d}",
+                        "得意先名": "株式会社 丸藤",
+                        "商品コード": clean_str(vals[9]),
+                        "商品名/摘要": clean_str(vals[10]),
+                        "数量": int(to_num(vals[11])),
+                        "受注残数": int(to_num(vals[11])),
+                        "受注日": "",
+                        "納入期日": "",
+                        "備考": clean_str(vals[12]) if len(vals) > 12 else "",
+                        "倉庫名": "",
+                        "担当者名": "",
+                        "受注日_dt": pd.NaT,
+                        "納入期日_dt": pd.NaT
+                    })
+                if len(vals) > 14 and clean_str(vals[13]) and clean_str(vals[13]) not in ("行ラベル", "総計", "(空白)"):
+                    fallback_rows.append({
+                        "受注番号": f"YAYOI-{idx_k:04d}",
+                        "得意先名": "弥生確保（一般）",
+                        "商品コード": clean_str(vals[13]),
+                        "商品名/摘要": "",
+                        "数量": int(to_num(vals[14])),
+                        "受注残数": int(to_num(vals[14])),
+                        "受注日": "",
+                        "納入期日": "",
+                        "備考": "",
+                        "倉庫名": "",
+                        "担当者名": "",
+                        "受注日_dt": pd.NaT,
+                        "納入期日_dt": pd.NaT
+                    })
+        df = pd.DataFrame(fallback_rows) if fallback_rows else pd.DataFrame(
+            columns=["受注番号", "得意先名", "商品コード", "数量", "受注残数", "受注日", "納入期日", "備考", "倉庫名", "担当者名", "受注日_dt", "納入期日_dt"]
+        )
 
     if os.path.exists(MANUAL_YAYOI_CSV):
         try:
@@ -621,93 +705,12 @@ def load_yayoi_data(file_source):
         df = df.sort_values(by=["受注日_dt", "納入期日_dt"], ascending=[False, False], na_position="last")
     return df
 
-# =========================================================
-# Supabase 取得処理
-# =========================================================
-@st.cache_data(ttl=1800)
-def get_supabase_meta():
-    if not supabase:
-        return 0, pd.Timestamp.now()
-    try:
-        res_cnt = supabase.table("sales_data").select("id", count="exact").limit(1).execute()
-        total_cnt = res_cnt.count if res_cnt.count is not None else 0
-        res_max = supabase.table("sales_data").select("日付").order("日付", desc=True).limit(1).execute()
-        max_dt = pd.Timestamp.now()
-        if res_max.data:
-            d_raw = clean_str(res_max.data[0].get("日付", "")).replace("-", "").replace("/", "")
-            dt_parsed = pd.to_datetime(d_raw, format="%Y%m%d", errors="coerce")
-            if pd.notna(dt_parsed):
-                max_dt = dt_parsed
-        return total_cnt, max_dt
-    except Exception:
-        return 0, pd.Timestamp.now()
-
-@st.cache_data(ttl=1800, show_spinner="⚡ Supabaseから売上データを高速集計中...")
-def fetch_sales_by_period_from_supabase(start_ymd_8: str, end_ymd_8: str):
-    if not supabase:
-        return pd.DataFrame(columns=["date_str", "date_fmt", "code_norm", "raw_code", "name", "cust", "staff", "qty", "price", "amount"])
-    all_rows = []
-    page_size = 1000
-    offset = 0
-    try:
-        while True:
-            res = (
-                supabase.table("sales_data")
-                .select("商品コード, 商品名, 得意先名, 担当者, 数量, 単価, 金額, 日付")
-                .gte("日付", start_ymd_8)
-                .lte("日付", end_ymd_8)
-                .order("日付", desc=True)
-                .range(offset, offset + page_size - 1)
-                .execute()
-            )
-            batch = res.data
-            if not batch:
-                break
-            all_rows.extend(batch)
-            if len(batch) < page_size:
-                break
-            offset += page_size
-            if offset >= 200000:
-                break
-
-        if not all_rows:
-            return pd.DataFrame(columns=["date_str", "date_fmt", "code_norm", "raw_code", "name", "cust", "staff", "qty", "price", "amount"])
-
-        df_raw = pd.DataFrame(all_rows)
-        df_raw["qty"] = pd.to_numeric(df_raw["数量"], errors="coerce").fillna(0.0)
-        df_raw = df_raw[df_raw["qty"] != 0].copy()
-        if df_raw.empty:
-            return pd.DataFrame(columns=["date_str", "date_fmt", "code_norm", "raw_code", "name", "cust", "staff", "qty", "price", "amount"])
-
-        df_raw["raw_code"] = df_raw["商品コード"].fillna("").astype(str).str.strip()
-        df_raw["code_norm"] = (
-            df_raw["raw_code"]
-            .str.upper()
-            .str.replace(" ", "", regex=False)
-            .str.replace(" ", "", regex=False)
-            .str.replace("－", "-", regex=False)
-            .str.replace("ー", "-", regex=False)
-            .str.replace("―", "-", regex=False)
-        )
-        df_raw["date_str"] = df_raw["日付"].fillna("").astype(str).str.strip().str.replace("-", "", regex=False).str.replace("/", "", regex=False)
-        df_raw["date_fmt"] = df_raw["date_str"].str.slice(0, 4) + "-" + df_raw["date_str"].str.slice(4, 6) + "-" + df_raw["date_str"].str.slice(6, 8)
-        df_raw["name"] = df_raw["商品名"].fillna("").astype(str).str.strip()
-        df_raw["cust"] = df_raw["得意先名"].fillna("").astype(str).str.strip().replace("", "（得意先名なし）")
-        df_raw["staff"] = df_raw["担当者"].fillna("").astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
-        df_raw["price"] = pd.to_numeric(df_raw["単価"], errors="coerce").fillna(0.0)
-        df_raw["amount"] = pd.to_numeric(df_raw["金額"], errors="coerce").fillna(0.0)
-
-        return df_raw[["date_str", "date_fmt", "code_norm", "raw_code", "name", "cust", "staff", "qty", "price", "amount"]]
-    except Exception as e:
-        st.error(f"❌ Supabaseデータ取得エラー: {e}")
-        return pd.DataFrame(columns=["date_str", "date_fmt", "code_norm", "raw_code", "name", "cust", "staff", "qty", "price", "amount"])
-
 # ---------------------------------------------------------
 # ヘッダー ＆ Googleドライブ同期ボタン ＆ アップローダー
 # ---------------------------------------------------------
 head_col1, head_col2, head_col3 = st.columns([2.7, 1.1, 1.8])
 with head_col1:
-    st.markdown('<div class="app-header">📊 発注検討表 ＆ 弥生受注管理システム（GDrive ＆ Supabase連動版）</div>', unsafe_allow_html=True)
+    st.markdown('<div class="app-header">📊 発注検討表 ＆ 弥生受注管理システム（Googleドライブ完全連動版）</div>', unsafe_allow_html=True)
 with head_col2:
     if st.button("🔄 Googleドライブから最新データを同期", type="primary", use_container_width=True):
         st.cache_data.clear()
@@ -722,15 +725,19 @@ with head_col3:
         up_comp = u_c3.file_uploader("🏢 弥生会社名.xlsx", type=["xlsx"], key="up_comp")
         up_item = u_c4.file_uploader("📦 弥生商品番号.xlsx", type=["xlsx"], key="up_item")
 
-# Googleドライブ優先で発注検討表を取得（取得できない場合はローカルファイルへフォールバック）
-gdrive_bytes = fetch_excel_bytes_from_gdrive(gdrive_url_input) if up_main is None else None
-main_src = up_main if up_main is not None else (gdrive_bytes if gdrive_bytes is not None else MAIN_EXCEL)
-yayoi_src = up_yayoi if up_yayoi is not None else YAYOI_EXCEL
-comp_src = up_comp if up_comp is not None else YAYOI_COMP_EXCEL
-item_src = up_item if up_item is not None else YAYOI_ITEM_EXCEL
+# Googleドライブからの一括同期実行
+gdrive_sync = sync_all_files_from_gdrive(gdrive_url_input)
 
-df_main, df_hist, prev_col_title, extra_meta, all_sheets_raw = load_excel_master(main_src)
-df_yayoi = load_yayoi_data(yayoi_src)
+if gdrive_sync["error_detail"] and up_main is None:
+    st.warning(f"⚠️ **Googleドライブ未接続（現在はバックアップファイルを表示中）**\n{gdrive_sync['error_detail']}")
+
+main_src = up_main if up_main is not None else (gdrive_sync["main_bytes"] if gdrive_sync["main_bytes"] is not None else find_local_file(["発注検討表"]))
+yayoi_src = up_yayoi if up_yayoi is not None else gdrive_sync["yayoi_bytes"]
+comp_src = up_comp if up_comp is not None else gdrive_sync["comp_bytes"]
+item_src = up_item if up_item is not None else gdrive_sync["item_bytes"]
+
+df_main, df_hist, prev_col_title, extra_meta, loaded_sheet_name, all_sheets_raw = load_excel_master(main_src)
+df_yayoi = load_yayoi_data(yayoi_src, all_sheets_raw)
 master_comps = load_company_master(comp_src)
 master_items = load_item_master(item_src)
 
@@ -742,7 +749,6 @@ marufuji_dict = {}
 yayoi_dict = {}
 yayoi_comp_search_map = {}
 
-# ★ 弥生確保リストをSUMIFS集計 ＆ 「直近確保」と「将来確保（納期別）」に自動分割
 if not df_yayoi.empty:
     df_yayoi["品番_正規化"] = df_yayoi["商品コード"].apply(normalize_code)
     df_yayoi["納期区分"] = df_yayoi.apply(lambda r: "将来" if is_future_delivery(r["納入期日"], r["備考"]) else "直近", axis=1)
@@ -752,11 +758,9 @@ if not df_yayoi.empty:
         return any(target.replace(" ", " ") in n_clean for target in MARUFUJI_TARGET_NAMES)
 
     df_yayoi["is_maru"] = df_yayoi["得意先名"].apply(is_marufuji_name)
-
     df_maru_only = df_yayoi[df_yayoi["is_maru"]]
     df_non_maru = df_yayoi[~df_yayoi["is_maru"]]
 
-    # 複数行もすべてSUMIFS合算（重複引き算も防止）
     yayoi_non_maru_totals = df_non_maru.groupby("品番_正規化")["数量"].sum().to_dict()
     marufuji_real_totals = df_maru_only.groupby("品番_正規化")["数量"].sum().to_dict()
 
@@ -771,9 +775,7 @@ if not df_yayoi.empty:
     total_sec_series = df_main["在庫確保_弥生"] + df_main["在庫確保_丸藤"]
     df_main["確保数のズレ"] = df_main["確保数_ロジザード"] - total_sec_series
 
-    # ① 直近フリー在庫（将来の確保分を引かない有効在庫）
     df_main["直近フリー在庫"] = (df_main["在庫数_ロジザード"] + df_main["確保数_ロジザード"] + df_main["入荷予定数_ロジザード"]) - df_main["直近確保_合計"]
-    # ② 全期間フリー在庫（将来の確保分もすべて引いた有効在庫）
     df_main["入荷後のフリー在庫"] = (df_main["在庫数_ロジザード"] + df_main["確保数_ロジザード"] + df_main["入荷予定数_ロジザード"]) - total_sec_series
 
     df_main["直近検討フラグ"] = df_main["直近フリー在庫"] - (df_main["1課発注点"] + df_main["2課発注点"])
@@ -809,112 +811,11 @@ for _, r in df_main.iterrows():
         item_wh_map[ic_n] = wh_def
         item_name_map[ic] = clean_str(r["商品区分"])
 
-# ---------------------------------------------------------
-# 期間ショートカット ＆ フィルタUI
-# ---------------------------------------------------------
-db_total_cnt, max_dt = get_supabase_meta()
-
-st.markdown('<div class="filter-box">', unsafe_allow_html=True)
-sc_col1, sc_col2 = st.columns([1.2, 4.0])
-sc_col1.markdown("#### 📅 期間ショートカット")
-shortcut_mode = sc_col2.radio(
-    "期間選択",
-    ["当月", "前月", "当期累計（7月〜6月）", "前期累計（7月〜6月）", "全データ累計", "手動指定"],
-    horizontal=True,
-    label_visibility="collapsed"
-)
-
-if shortcut_mode == "当月":
-    start_dt = pd.Timestamp(max_dt.year, max_dt.month, 1)
-    end_dt = pd.Timestamp(max_dt.year, max_dt.month, max_dt.days_in_month)
-elif shortcut_mode == "前月":
-    first_this_month = pd.Timestamp(max_dt.year, max_dt.month, 1)
-    end_dt = first_this_month - pd.Timedelta(days=1)
-    start_dt = pd.Timestamp(end_dt.year, end_dt.month, 1)
-elif shortcut_mode == "当期累計（7月〜6月）":
-    fy_start_year = max_dt.year if max_dt.month >= 7 else max_dt.year - 1
-    start_dt = pd.Timestamp(fy_start_year, 7, 1)
-    end_dt = max_dt
-elif shortcut_mode == "前期累計（7月〜6月）":
-    fy_start_year = max_dt.year - 1 if max_dt.month >= 7 else max_dt.year - 2
-    start_dt = pd.Timestamp(fy_start_year, 7, 1)
-    end_dt = pd.Timestamp(fy_start_year + 1, 6, 30)
-elif shortcut_mode == "全データ累計":
-    start_dt = pd.Timestamp("2020-01-01")
-    end_dt = pd.Timestamp("2030-12-31")
-elif shortcut_mode == "手動指定":
-    m_col1, m_col2 = st.columns(2)
-    def_start = pd.Timestamp(max_dt.year, max_dt.month, 1).date()
-    def_end = max_dt.date()
-    s_date_input = m_col1.date_input("開始日", value=def_start)
-    e_date_input = m_col2.date_input("終了日", value=def_end)
-    start_dt = pd.Timestamp(s_date_input)
-    end_dt = pd.Timestamp(e_date_input)
-
-st.markdown('</div>', unsafe_allow_html=True)
-
-start_ymd_str = start_dt.strftime("%Y%m%d")
-end_ymd_str = end_dt.strftime("%Y%m%d")
-
 target_norm_codes = set(df_main["品番_正規化"].unique())
-df_sales_filtered = fetch_sales_by_period_from_supabase(start_ymd_str, end_ymd_str)
-
-active_sales_dict = {}
-sales_company_map = {}
-sales_detail_map = {}
-sales_comp_search_map = {}
-
-if not df_sales_filtered.empty:
-    active_sales_dict = df_sales_filtered.groupby("code_norm")["qty"].sum().round().astype(int).to_dict()
-    df_s_target = df_sales_filtered[df_sales_filtered["code_norm"].isin(target_norm_codes)]
-    if not df_s_target.empty:
-        comp_grp = (
-            df_s_target.groupby(["code_norm", "cust"], as_index=False)
-            .agg(
-                qty=("qty", "sum"),
-                amount=("amount", "sum"),
-                cnt=("date_fmt", "count"),
-                last_date=("date_fmt", "max")
-            )
-            .sort_values(["code_norm", "qty"], ascending=[True, False])
-        )
-        for c_norm, grp in comp_grp.groupby("code_norm", sort=False):
-            tot_q = grp["qty"].sum()
-            sales_comp_search_map[c_norm] = " ".join(grp["cust"].unique())
-            c_list = []
-            for _, r_c in grp.iterrows():
-                share = round((r_c["qty"] / tot_q * 100), 1) if tot_q > 0 else 0.0
-                c_list.append({
-                    "得意先名": r_c["cust"],
-                    "数量": int(round(r_c["qty"])),
-                    "構成比": f"{share}%",
-                    "金額": int(round(r_c["amount"])),
-                    "伝票回数": int(r_c["cnt"]),
-                    "最終売上日": r_c["last_date"]
-                })
-            sales_company_map[c_norm] = c_list
-
-        for c_norm, grp in df_s_target.groupby("code_norm", sort=False):
-            d_list = []
-            for _, r_d in grp.head(50).iterrows():
-                d_list.append({
-                    "日付": r_d["date_fmt"],
-                    "得意先名": r_d["cust"],
-                    "数量": int(round(r_d["qty"])),
-                    "単価": int(round(r_d["price"])),
-                    "金額": int(round(r_d["amount"])),
-                    "担当者": r_d["staff"]
-                })
-            sales_detail_map[c_norm] = d_list
-
-df_main["今月売れ数"] = df_main["品番_正規化"].map(active_sales_dict).fillna(0).astype(int)
-df_main["関連会社検索用"] = (
-    df_main["品番_正規化"].map(yayoi_comp_search_map).fillna("") + " " +
-    df_main["品番_正規化"].map(sales_comp_search_map).fillna("")
-)
+df_main["関連会社検索用"] = df_main["品番_正規化"].map(yayoi_comp_search_map).fillna("")
 m_df = df_main.copy()
 
-# ★ 発注抜け防止：弥生確保があるのに発注マスターに未登録の品番を自動検出
+# 発注抜け防止：弥生確保があるのに発注マスターに未登録の品番を自動検出
 unregistered_list = []
 all_kakuho_check = {}
 if not df_yayoi.empty:
@@ -947,21 +848,18 @@ if df_hist is not None and not df_hist.empty:
     for p_code, grp in df_hist.groupby("品番", sort=False):
         hist_dict[p_code] = grp.sort_values("会議日", ascending=False)[["会議日", "決定事項"]].to_dict(orient="records")
 
-total_sales_qty = int(m_df["今月売れ数"].sum())
-asc001_qty = int(active_sales_dict.get("ASC-001", 0)) if active_sales_dict else 0
-period_label = f"{start_dt.strftime('%Y/%m/%d')}〜{end_dt.strftime('%Y/%m/%d')}"
-src_status = "☁️ Googleドライブ自動連携中" if gdrive_bytes is not None else "📂 ローカル/アップロードファイル参照中"
-
+src_status = f"✅ Googleドライブ同期完了 ({gdrive_sync['source_label']})" if gdrive_sync["main_bytes"] is not None else "📂 ローカル/アップロードファイル参照中"
 st.caption(
-    f"**{src_status}** ｜ ☁️ **Supabase (sales_data) 連携中** ｜ 対象期間: **{shortcut_mode} ({period_label})** ｜ "
-    f"🔥 期間内売れ数合計: **{total_sales_qty:,}** 個 （DB総件数: {db_total_cnt:,} 件 ／ 未登録アラート: **{len(df_unreg)}** 件）"
+    f"**{src_status}** ｜ 参照シート: **{loaded_sheet_name}** ({len(m_df):,} 品番) ｜ "
+    f"🚨 直近要発注: **{int((m_df['直近検討フラグ'] < 0).sum())}** 件 ／ 将来含め要発注: **{int((m_df['発注検討フラグ'] < 0).sum())}** 件 ／ "
+    f"マスター未登録アラート: **{len(df_unreg)}** 件"
 )
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     f"📋 1. 発注検討表（納期別有効在庫 ＆ SUMIFS完全合算）",
     "🏢 2. 会社（得意先）別・受注番号別 確保リスト",
     "💻 3. 弥生受注伝票（リアルタイム発注判定つき）",
-    "🕒 4. 入荷予定・会議履歴 ＆ 売上データ検証",
+    "🕒 4. 入荷予定 ＆ 過去の会議決定履歴",
     f"🚀 5. 営業用・大口注文即判定シミュレーター ＆ 抜け防止 ({len(df_unreg)}件)"
 ])
 
@@ -972,8 +870,6 @@ with tab1:
     yayoi_json = json.dumps(yayoi_dict, ensure_ascii=False)
     marufuji_json = json.dumps(marufuji_dict, ensure_ascii=False)
     hist_json = json.dumps(hist_dict, ensure_ascii=False)
-    sales_comp_json = json.dumps(sales_company_map, ensure_ascii=False)
-    sales_det_json = json.dumps(sales_detail_map, ensure_ascii=False)
     prev_title_html = prev_col_title.replace("(", "<br>(")
 
     html_tab1 = f"""
@@ -1008,7 +904,7 @@ with tab1:
             cursor: pointer; border: none; background: #2563eb; color: #fff;
         }}
         .btn-download:hover {{ background: #1d4ed8; }}
-        .table-wrap {{ width: 100%; height: 600px; overflow: auto; border: 1px solid #94a3b8; position: relative; }}
+        .table-wrap {{ width: 100%; height: 620px; overflow: auto; border: 1px solid #94a3b8; position: relative; }}
         table {{ border-collapse: separate; border-spacing: 0; width: max-content; min-width: 100%; }}
         th, td {{ border-right: 1px solid #94a3b8; border-bottom: 1px solid #94a3b8; padding: 3px 6px; font-size: 12px; height: 30px; }}
         thead th {{
@@ -1039,14 +935,11 @@ with tab1:
         .bg-pink-rate {{ background-color: #fbcfe8 !important; color: #be123c; font-weight: bold; }}
         .bg-yellow-ro {{ background-color: #fef08a !important; color: #1e293b; }}
         .bg-yellow-edit {{ background-color: #ffff00 !important; }}
-        .bg-sales-hit {{ background-color: #fed7aa !important; font-weight: bold; color: #c2410c; }}
         .bg-hist-ki {{ background-color: #f1f5f9; color: #475569; }}
         .bg-zure-diff {{ background-color: #ffe4e6 !important; color: #be123c; font-weight: bold; }}
 
         tbody tr:hover td {{ filter: brightness(0.95); }}
         .click-link {{ color: #0284c7; font-weight: bold; text-decoration: underline; cursor: pointer; display: block; width: 100%; }}
-        .click-link-sales {{ color: #c2410c; font-weight: bold; text-decoration: underline; cursor: pointer; display: block; width: 100%; }}
-        .click-link-ki {{ color: #334155; font-weight: bold; text-decoration: underline; cursor: pointer; display: block; width: 100%; }}
         .cell-input {{ width: 100%; height: 23px; border: 1px solid #94a3b8; border-radius: 2px; padding: 1px 4px; font-size: 12px; background: rgba(255,255,255,0.9); }}
         .cell-input-point {{ width: 100%; height: 23px; border: 1px solid #3b82f6; border-radius: 2px; padding: 1px 4px; font-size: 12px; font-weight: bold; text-align: right; background: #eff6ff; }}
 
@@ -1055,7 +948,7 @@ with tab1:
             background: rgba(15, 23, 42, 0.7); z-index: 9999; justify-content: center; align-items: center;
         }}
         .modal-window {{
-            background: #fff; width: 99%; max-width: 1750px; height: 96vh; border-radius: 10px;
+            background: #fff; width: 99%; max-width: 1750px; height: 94vh; border-radius: 10px;
             box-shadow: 0 25px 40px -5px rgba(0,0,0,0.45); display: flex; flex-direction: column; overflow: hidden; border: 3px solid #1e40af;
         }}
         .modal-header {{ background: #1e3a8a; color: #fff; padding: 14px 24px; display: flex; justify-content: space-between; align-items: center; }}
@@ -1084,8 +977,6 @@ with tab1:
                 <option value="all">すべて表示（Excelと同じ並び）</option>
                 <option value="need_order_near">🚨 【直近で要発注】直近フリー在庫が発注点割れ</option>
                 <option value="need_order">⚠️ 【将来含め要発注】全期間フリー在庫が発注点割れ</option>
-                <option value="hit">🔥 【ヒット商品】在庫があるのに期間内売れている</option>
-                <option value="sold">🔥 期間内に売れている商品すべて（売れ数1以上・多い順）</option>
                 <option value="zure">確保数のズレがある商品</option>
                 <option value="incoming">入荷予定がある商品</option>
                 <option value="secured">弥生確保または丸藤確保がある商品</option>
@@ -1098,13 +989,13 @@ with tab1:
             </select>
         </div>
         <div class="filter-group">
-            <label class="filter-label">🔍 品番・商品名・会社名（売上先/確保先）・決定事項でリアルタイム検索</label>
+            <label class="filter-label">🔍 品番・商品名・会社名（確保先）・決定事項でリアルタイム検索</label>
             <input type="text" id="js-search-kw" class="filter-input" placeholder="文字を打つと0.01秒で絞り込みます（例: ASC-001 / ライト / 丸藤 / トップ産業）" oninput="applyInstantFilter()">
         </div>
     </div>
 
     <div class="toolbar">
-        <div class="toolbar-info">表示件数: <span id="row-count">0</span> 件 ｜ 💡 「直近確保/将来確保」を自動分離済！「在庫確保」や「🔥売れ数」クリックで内訳POPが開きます</div>
+        <div class="toolbar-info">表示件数: <span id="row-count">0</span> 件 ｜ 💡 「品番」や「在庫確保」の数字をクリックすると、会社別・納期別の確保内訳POPが開きます</div>
         <button class="btn-download" onclick="exportEditedCSV()">📥 編集内容を反映したCSV出力</button>
     </div>
     <div class="table-wrap">
@@ -1115,10 +1006,10 @@ with tab1:
                     <th class="w-center sticky-col-2">商品<br>センター</th>
                     <th class="w-code sticky-col-3">品番</th>
                     <th class="w-name sticky-col-4">商品区分</th>
-                    <th class="w-num bg-hist-ki">73期<br>実績</th>
                     <th class="w-num bg-hist-ki">74期<br>実績</th>
                     <th class="w-num bg-hist-ki">75期<br>実績</th>
                     <th class="w-num bg-hist-ki">76期<br>実績</th>
+                    <th class="w-num bg-hist-ki">77期<br>今期出荷</th>
                     <th class="w-num" style="background:#e0f2fe;">1課発注点<br><span style="color:#0369a1; font-size:10px;">✏️手動修正可</span></th>
                     <th class="w-num" style="background:#e0f2fe;">2課発注点<br><span style="color:#0369a1; font-size:10px;">✏️手動修正可</span></th>
                     <th class="w-num bg-cyan">在庫数<br><span class="red-txt">ロジザード</span></th>
@@ -1133,7 +1024,6 @@ with tab1:
                     <th class="w-num bg-cyan">②全期間<br>フリー在庫<br><span style="font-size:10px;">(将来引当後)</span></th>
                     <th class="w-num">直近検討<br>フラグ<br><span class="red-txt">直近要発注</span></th>
                     <th class="w-num">全期間検討<br>フラグ<br><span class="red-txt">将来含め</span></th>
-                    <th class="w-num">期間内売れ数<br><span style="color:#c2410c; font-weight:bold;">🔥クリックで内訳</span></th>
                     <th class="w-num">在庫回転<br>率</th>
                     <th class="w-num">リンベル<br>確保数</th>
                     <th class="w-prev-dec bg-yellow-ro">{prev_title_html}</th>
@@ -1148,11 +1038,10 @@ with tab1:
     <div class="modal-overlay" id="detail-modal" onclick="closeModalOnBg(event)">
         <div class="modal-window">
             <div class="modal-header">
-                <div class="modal-title" id="modal-title-text">📦 品番詳細・会社別データ</div>
+                <div class="modal-title" id="modal-title-text">📦 品番詳細・確保内訳データ</div>
                 <div style="display:flex; gap:10px; align-items:center;">
-                    <button class="mode-btn" id="btn-mode-sales" onclick="switchModalMode('sales')">🔥 会社別の売上実績を見る</button>
-                    <button class="mode-btn" id="btn-mode-yayoi" onclick="switchModalMode('yayoi')">🏢 弥生確保リストを見る</button>
-                    <button class="mode-btn" id="btn-mode-maru" onclick="switchModalMode('marufuji')">🏢 丸藤確保のみ見る</button>
+                    <button class="mode-btn" id="btn-mode-yayoi" onclick="switchModalMode('yayoi')">🏢 弥生確保リスト（すべて）</button>
+                    <button class="mode-btn" id="btn-mode-maru" onclick="switchModalMode('marufuji')">🏢 丸藤確保のみ表示</button>
                     <button class="modal-close" onclick="closeModal()">✕ 閉じる</button>
                 </div>
             </div>
@@ -1182,7 +1071,7 @@ with tab1:
                 </div>
                 <div class="modal-grid">
                     <div>
-                        <div class="sec-title" id="modal-sub-title">🏢 詳細リスト</div>
+                        <div class="sec-title" id="modal-sub-title">🏢 確保明細リスト</div>
                         <div id="modal-yayoi-area"></div>
                     </div>
                     <div>
@@ -1200,11 +1089,8 @@ with tab1:
         const yayoiMap = {yayoi_json};
         const marufujiMap = {marufuji_json};
         const histMap = {hist_json};
-        const salesCompMap = {sales_comp_json};
-        const salesDetMap = {sales_det_json};
-        const currentPeriodLabel = "{shortcut_mode} ({period_label})";
         let currentModalIdx = null;
-        let currentModalMode = "sales";
+        let currentModalMode = "yayoi";
         let visibleIndices = [];
 
         const centerSel = document.getElementById("js-filter-center");
@@ -1287,8 +1173,6 @@ with tab1:
             let filtered = tableData.filter(r => {{
                 if (fMode === "need_order_near" && !(Number(r["直近検討フラグ"]) < 0)) return false;
                 if (fMode === "need_order" && !(Number(r["発注検討フラグ"]) < 0)) return false;
-                if (fMode === "hit" && !(Number(r["入荷後のフリー在庫"]) >= 1 && Number(r["今月売れ数"]) >= 1)) return false;
-                if (fMode === "sold" && !(Number(r["今月売れ数"]) >= 1)) return false;
                 if (fMode === "zure" && !(Number(r["確保数のズレ"]) !== 0)) return false;
                 if (fMode === "incoming" && !(Number(r["入荷予定数_ロジザード"]) > 0 || (r["入荷予定日_ロジザード"] && r["入荷予定日_ロジザード"] !== ""))) return false;
                 if (fMode === "secured" && !(Number(r["在庫確保_弥生"]) > 0 || Number(r["在庫確保_丸藤"]) > 0)) return false;
@@ -1303,10 +1187,6 @@ with tab1:
                 }}
                 return true;
             }});
-
-            if (fMode === "sold") {{
-                filtered.sort((a, b) => Number(b["今月売れ数"]) - Number(a["今月売れ数"]));
-            }}
 
             visibleIndices = filtered.map(r => r["_origIdx"]);
             renderTable(filtered);
@@ -1324,20 +1204,18 @@ with tab1:
                 const flagCls = (flagVal < 0) ? "bg-flag-neg" : "bg-cyan";
                 const rateVal = Number(r["在庫回転率"]);
                 const rateCls = (rateVal <= 5) ? "bg-pink-rate" : "bg-green";
-                const salesVal = Number(r["今月売れ数"] || 0);
-                const salesCls = (salesVal >= 1) ? "bg-sales-hit" : "";
                 const zureVal = Number(r["確保数のズレ"] || 0);
                 const zureCls = (zureVal !== 0) ? "bg-zure-diff" : "bg-cyan";
 
                 html += `<tr>
                     <td class="w-no sticky-col-1">${{r["No"]}}</td>
                     <td class="w-center sticky-col-2">${{r["商品センター"]}}</td>
-                    <td class="w-code sticky-col-3" title="${{r["品番"]}}"><span class="click-link" onclick="openModal(${{idx}}, 'sales')">${{r["品番"]}}</span></td>
+                    <td class="w-code sticky-col-3" title="${{r["品番"]}}"><span class="click-link" onclick="openModal(${{idx}}, 'yayoi')">${{r["品番"]}}</span></td>
                     <td class="w-name sticky-col-4" title="${{r["商品区分"]}}">${{r["商品区分"]}}</td>
-                    <td class="w-num bg-hist-ki"><span class="click-link-ki" onclick="openModal(${{idx}}, 'sales')">${{fmtNum(r["73期"])}}</span></td>
-                    <td class="w-num bg-hist-ki"><span class="click-link-ki" onclick="openModal(${{idx}}, 'sales')">${{fmtNum(r["74期"])}}</span></td>
-                    <td class="w-num bg-hist-ki"><span class="click-link-ki" onclick="openModal(${{idx}}, 'sales')">${{fmtNum(r["75期"])}}</span></td>
-                    <td class="w-num bg-hist-ki"><span class="click-link-ki" onclick="openModal(${{idx}}, 'sales')">${{fmtNum(r["76期"])}}</span></td>
+                    <td class="w-num bg-hist-ki">${{fmtNum(r["74期"])}}</td>
+                    <td class="w-num bg-hist-ki">${{fmtNum(r["75期"])}}</td>
+                    <td class="w-num bg-hist-ki">${{fmtNum(r["76期"])}}</td>
+                    <td class="w-num bg-hist-ki" style="font-weight:bold; color:#0f172a;">${{fmtNum(r["77期"])}}</td>
                     <td class="w-num"><input type="number" class="cell-input-point" id="point1-${{idx}}" value="${{r["1課発注点"]}}" oninput="tableData[${{idx}}]['1課発注点']=Number(this.value); recalculateRow(${{idx}})" onkeydown="handleKeyDown(event, 'point1', ${{idx}})"></td>
                     <td class="w-num"><input type="number" class="cell-input-point" id="point2-${{idx}}" value="${{r["2課発注点"]}}" oninput="tableData[${{idx}}]['2課発注点']=Number(this.value); recalculateRow(${{idx}})" onkeydown="handleKeyDown(event, 'point2', ${{idx}})"></td>
                     <td class="w-num bg-cyan">${{fmtNum(r["在庫数_ロジザード"])}}</td>
@@ -1352,7 +1230,6 @@ with tab1:
                     <td class="w-num bg-cyan">${{fmtNum(r["入荷後のフリー在庫"])}}</td>
                     <td class="w-num ${{nFlagCls}}" id="nflag-${{idx}}">${{fmtNum(r["直近検討フラグ"])}}</td>
                     <td class="w-num ${{flagCls}}" id="flag-${{idx}}">${{fmtNum(r["発注検討フラグ"])}}</td>
-                    <td class="w-num ${{salesCls}}"><span class="click-link-sales" onclick="openModal(${{idx}}, 'sales')">${{salesVal > 0 ? "🔥 " + fmtNum(salesVal) : "0"}}</span></td>
                     <td class="w-num ${{rateCls}}">${{fmtNum(r["在庫回転率"]) + "%"}}</td>
                     <td class="w-num">${{fmtNum(r["リンベル確保数"])}}</td>
                     <td class="w-prev-dec bg-yellow-ro" title="${{r["前回決定事項"] || ""}}">${{r["前回決定事項"] || ""}}</td>
@@ -1392,13 +1269,12 @@ with tab1:
             const code = r["品番"];
             const codeNorm = r["品番_正規化"] || code;
 
-            document.getElementById("btn-mode-sales").className = (mode === 'sales') ? "mode-btn active" : "mode-btn";
             document.getElementById("btn-mode-yayoi").className = (mode === 'yayoi') ? "mode-btn active" : "mode-btn";
             document.getElementById("btn-mode-maru").className = (mode === 'marufuji') ? "mode-btn active" : "mode-btn";
 
             document.getElementById("modal-title-text").innerHTML = `📦 品番: 【${{code}}】 ${{r["商品区分"]}}`;
             document.getElementById("modal-summary").innerHTML = `
-                <div class="summary-item">期間内売れ数: <span style="color:#ea580c;">🔥 ${{fmtNum(r["今月売れ数"])}} 個</span></div>
+                <div class="summary-item">74〜77期出荷: <span>${{fmtNum(r["74期"])}} / ${{fmtNum(r["75期"])}} / ${{fmtNum(r["76期"])}} / ${{fmtNum(r["77期"])}}</span></div>
                 <div class="summary-item">1課/2課発注点: <span>${{fmtNum(r["1課発注点"])}} / ${{fmtNum(r["2課発注点"])}}</span></div>
                 <div class="summary-item">ロジ在庫: <span>${{fmtNum(r["在庫数_ロジザード"])}}</span></div>
                 <div class="summary-item">直近確保 / 将来確保: <span>${{fmtNum(r["直近確保_合計"])}} / ${{fmtNum(r["将来確保_合計"])}}</span></div>
@@ -1411,75 +1287,35 @@ with tab1:
             document.getElementById("modal-input-dec").value = r["決定事項"] || "";
             document.getElementById("modal-input-odate").value = r["発注日"] || "";
 
-            if (mode === 'sales') {{
-                document.getElementById("modal-sub-title").innerHTML = `🔥 会社（得意先）別 売上実績ランキング ｜ 対象期間: ${{currentPeriodLabel}}`;
-                const compList = salesCompMap[codeNorm] || [];
-                const detList = salesDetMap[codeNorm] || [];
-                if (compList.length === 0) {{
-                    document.getElementById("modal-yayoi-area").innerHTML = `<div style="padding:16px; font-size:14.5px; color:#64748b; background:#f8fafc;">選択された期間（${{currentPeriodLabel}}）の売上データはありません。</div>`;
-                }} else {{
-                    let sHtml = `<table class="sub-table"><thead><tr><th style="width:50px;">順位</th><th>会社名（得意先名）</th><th style="width:110px;">売上個数</th><th style="width:85px;">構成比</th><th style="width:120px;">売上金額</th><th style="width:85px;">伝票回数</th><th style="width:110px;">最終売上日</th></tr></thead><tbody>`;
-                    compList.forEach((c, cIdx) => {{
-                        sHtml += `<tr>
-                            <td style="text-align:center; font-weight:bold;">${{cIdx + 1}}</td>
-                            <td style="font-weight:bold; color:#1e293b;">${{c["得意先名"]}}</td>
-                            <td style="text-align:right; font-weight:bold; color:#ea580c; background:#fff7ed; font-size:15.5px;">${{fmtNum(c["数量"])}} 個</td>
-                            <td style="text-align:right; font-weight:bold;">${{c["構成比"]}}</td>
-                            <td style="text-align:right;">¥${{fmtNum(c["金額"])}}</td>
-                            <td style="text-align:center;">${{fmtNum(c["伝票回数"])}} 回</td>
-                            <td style="text-align:center;">${{c["最終売上日"]}}</td>
-                        </tr>`;
-                    }});
-                    sHtml += `</tbody></table>`;
-
-                    if (detList.length > 0) {{
-                        sHtml += `<div class="sec-title" style="margin-top:18px;">📄 売上伝票明細（最新50件）</div>`;
-                        sHtml += `<table class="sub-table"><thead><tr><th style="width:110px;">売上日</th><th>得意先名</th><th style="width:95px;">数量</th><th style="width:95px;">単価</th><th style="width:115px;">金額</th><th style="width:90px;">担当者</th></tr></thead><tbody>`;
-                        detList.forEach(d => {{
-                            sHtml += `<tr>
-                                <td style="text-align:center; font-weight:bold;">${{d["日付"]}}</td>
-                                <td style="font-weight:bold;">${{d["得意先名"]}}</td>
-                                <td style="text-align:right; font-weight:bold; color:#0284c7;">${{fmtNum(d["数量"])}}</td>
-                                <td style="text-align:right;">¥${{fmtNum(d["単価"])}}</td>
-                                <td style="text-align:right;">¥${{fmtNum(d["金額"])}}</td>
-                                <td style="text-align:center;">${{d["担当者"]}}</td>
-                            </tr>`;
-                        }});
-                        sHtml += `</tbody></table>`;
-                    }}
-                    document.getElementById("modal-yayoi-area").innerHTML = sHtml;
-                }}
+            let targetList = [];
+            if (mode === 'marufuji') {{
+                document.getElementById("modal-sub-title").innerHTML = "🏢 【丸藤専用】確保リスト（丸藤の受注のみ表示）";
+                targetList = marufujiMap[codeNorm] || [];
             }} else {{
-                let targetList = [];
-                if (mode === 'marufuji') {{
-                    document.getElementById("modal-sub-title").innerHTML = "🏢 【丸藤専用】確保リスト（丸藤の受注のみ表示）";
-                    targetList = marufujiMap[codeNorm] || [];
-                }} else {{
-                    document.getElementById("modal-sub-title").innerHTML = "🏢 得意先別・弥生確保リスト（納期区分つき・受注日最新順）";
-                    targetList = yayoiMap[codeNorm] || [];
-                }}
+                document.getElementById("modal-sub-title").innerHTML = "🏢 得意先別・弥生確保リスト（納期区分つき・受注日最新順）";
+                targetList = yayoiMap[codeNorm] || [];
+            }}
 
-                if (targetList.length === 0) {{
-                    document.getElementById("modal-yayoi-area").innerHTML = `<div style="padding:16px; font-size:14.5px; color:#64748b; background:#f8fafc;">該当する受注確保データはありません。</div>`;
-                }} else {{
-                    let yHtml = `<table class="sub-table"><thead><tr><th>受注番号</th><th>得意先名</th><th>数量</th><th>納期区分</th><th>受注日</th><th>納入期日</th><th>倉庫名</th><th>担当者</th><th>備考</th></tr></thead><tbody>`;
-                    targetList.forEach(y => {{
-                        const bColor = (y["納期区分"] === "将来") ? "#dbeafe" : "#dcfce7";
-                        yHtml += `<tr>
-                            <td style="text-align:center; font-weight:bold;">${{y["受注番号"] || ""}}</td>
-                            <td style="font-weight:bold;">${{y["得意先名"]}}</td>
-                            <td style="text-align:right; font-weight:bold; color:#0284c7; font-size:15.5px;">${{fmtNum(y["数量"])}}</td>
-                            <td style="text-align:center; font-weight:bold; background:${{bColor}};">${{y["納期区分"] || "直近"}}</td>
-                            <td style="text-align:center;">${{y["受注日"]}}</td>
-                            <td style="text-align:center;">${{y["納入期日"]}}</td>
-                            <td style="text-align:center; font-weight:bold;">${{y["倉庫名"] || ""}}</td>
-                            <td style="text-align:center;">${{y["担当者名"] || ""}}</td>
-                            <td>${{y["備考"]}}</td>
-                        </tr>`;
-                    }});
-                    yHtml += `</tbody></table>`;
-                    document.getElementById("modal-yayoi-area").innerHTML = yHtml;
-                }}
+            if (targetList.length === 0) {{
+                document.getElementById("modal-yayoi-area").innerHTML = `<div style="padding:16px; font-size:14.5px; color:#64748b; background:#f8fafc;">該当する受注確保データはありません。</div>`;
+            }} else {{
+                let yHtml = `<table class="sub-table"><thead><tr><th>受注番号</th><th>得意先名</th><th>数量</th><th>納期区分</th><th>受注日</th><th>納入期日</th><th>倉庫名</th><th>担当者</th><th>備考</th></tr></thead><tbody>`;
+                targetList.forEach(y => {{
+                    const bColor = (y["納期区分"] === "将来") ? "#dbeafe" : "#dcfce7";
+                    yHtml += `<tr>
+                        <td style="text-align:center; font-weight:bold;">${{y["受注番号"] || ""}}</td>
+                        <td style="font-weight:bold;">${{y["得意先名"]}}</td>
+                        <td style="text-align:right; font-weight:bold; color:#0284c7; font-size:15.5px;">${{fmtNum(y["数量"])}}</td>
+                        <td style="text-align:center; font-weight:bold; background:${{bColor}};">${{y["納期区分"] || "直近"}}</td>
+                        <td style="text-align:center;">${{y["受注日"]}}</td>
+                        <td style="text-align:center;">${{y["納入期日"]}}</td>
+                        <td style="text-align:center; font-weight:bold;">${{y["倉庫名"] || ""}}</td>
+                        <td style="text-align:center;">${{y["担当者名"] || ""}}</td>
+                        <td>${{y["備考"]}}</td>
+                    </tr>`;
+                }});
+                yHtml += `</tbody></table>`;
+                document.getElementById("modal-yayoi-area").innerHTML = yHtml;
             }}
 
             const hList = histMap[code] || [];
@@ -1524,7 +1360,7 @@ with tab1:
         function closeModalOnBg(e) {{ if (e.target.id === "detail-modal") closeModal(); }}
 
         function exportEditedCSV() {{
-            const cols = ["No", "商品センター", "品番", "商品区分", "73期", "74期", "75期", "76期", "1課発注点", "2課発注点", "在庫数_ロジザード", "入荷予定数_ロジザード", "入荷予定日_ロジザード", "確保数_ロジザード", "在庫確保_弥生", "在庫確保_丸藤", "将来確保_合計", "確保数のズレ", "直近フリー在庫", "入荷後のフリー在庫", "直近検討フラグ", "発注検討フラグ", "今月売れ数", "在庫回転率", "リンベル確保数", "前回決定事項", "決定事項", "発注日"];
+            const cols = ["No", "商品センター", "品番", "商品区分", "74期", "75期", "76期", "77期", "1課発注点", "2課発注点", "在庫数_ロジザード", "入荷予定数_ロジザード", "入荷予定日_ロジザード", "確保数_ロジザード", "在庫確保_弥生", "在庫確保_丸藤", "将来確保_合計", "確保数のズレ", "直近フリー在庫", "入荷後のフリー在庫", "直近検討フラグ", "発注検討フラグ", "在庫回転率", "リンベル確保数", "前回決定事項", "決定事項", "発注日"];
             let csv = "\\uFEFF" + cols.join(",") + "\\n";
             tableData.forEach(r => {{
                 csv += cols.map(c => `"${{String(r[c] ?? "").replace(/"/g, '""')}}"`).join(",") + "\\n";
@@ -1644,7 +1480,7 @@ with tab2:
                 background: rgba(15, 23, 42, 0.7); z-index: 9999; justify-content: center; align-items: center;
             }}
             .modal-window {{
-                background: #fff; width: 99%; max-width: 1750px; height: 96vh; border-radius: 10px;
+                background: #fff; width: 99%; max-width: 1750px; height: 94vh; border-radius: 10px;
                 box-shadow: 0 25px 40px -5px rgba(0,0,0,0.45); display: flex; flex-direction: column; overflow: hidden; border: 3px solid #1e40af;
             }}
             .modal-header {{ background: #1e3a8a; color: #fff; padding: 16px 24px; display: flex; justify-content: space-between; align-items: center; }}
@@ -1785,7 +1621,6 @@ with tab2:
         """
         components.html(html_tab2, height=650, scrolling=False)
 
-# マスター高速検索用辞書（タブ3・タブ5の即判定シミュレーター用）
 master_sim_map = {}
 for _, r_m in m_df.iterrows():
     master_sim_map[r_m["品番_正規化"]] = {
@@ -1893,16 +1728,8 @@ with tab3:
         target_ono = modal_summary.iloc[target_idx]["受注番号"]
         target_lines = df_yayoi[df_yayoi["受注番号"].astype(str) == str(target_ono)]
 
-        st.markdown(
-            f"""
-            <div style="background:#eff6ff; border-left:5px solid #2563eb; padding:8px 12px; border-radius:4px; margin:6px 0;">
-                <b>📦 選択中の伝票明細</b> ｜ 受注番号: <b>{target_ono}</b> ／ 得意先: <b>{modal_summary.iloc[target_idx]['得意先名']}</b>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
         st.dataframe(
-            target_lines[["商品コード", "商品名/摘要", "倉庫名", "数量", "納入期日", "備考"]],
+            target_lines[["商品コード", "倉庫名", "数量", "納入期日", "備考"]],
             hide_index=True,
             use_container_width=True,
             height=160
@@ -1977,9 +1804,6 @@ with tab3:
             slip_state["grid_df"] = pd.concat([cur_df, extra_df], ignore_index=True)
             st.rerun()
 
-    st.markdown('<div class="yayoi-slip-header">💻 受注伝票入力（商品コードと数量を入れると「商品名」「倉庫名」「発注判定」が自動連動）</div>', unsafe_allow_html=True)
-    st.markdown('<div class="yayoi-slip-body">', unsafe_allow_html=True)
-
     h1, h2, h3, h4 = st.columns([1.4, 1.4, 1.4, 1.8])
     in_ono = h1.text_input("受注番号（自動採番）", value=slip_state["order_no"], key=f"ono_{v_key}")
     in_odate = h2.date_input("受注日", value=slip_state["order_date"], key=f"odate_{v_key}")
@@ -2011,8 +1835,6 @@ with tab3:
         key=f"sum_{v_key}"
     )
 
-    st.markdown(f"##### 📝 内訳明細（全 {len(master_items):,} 商品対応 ／ 数量を入れると右端に『発注判定』が自動表示されます）")
-
     if "発注判定" not in slip_state["grid_df"].columns:
         slip_state["grid_df"]["発注判定"] = ""
 
@@ -2028,33 +1850,11 @@ with tab3:
                 options=item_code_list,
                 width="medium"
             ),
-            "商品名": st.column_config.TextColumn(
-                "商品名 (自動)",
-                width="medium",
-                disabled=True
-            ),
-            "倉庫名": st.column_config.TextColumn(
-                "倉庫名 (自動)",
-                width="small",
-                disabled=True
-            ),
-            "受注残数(数量)": st.column_config.NumberColumn(
-                "受注残数 (数量)",
-                min_value=0,
-                max_value=999999,
-                step=1,
-                default=0,
-                width="small"
-            ),
-            "備考": st.column_config.TextColumn(
-                "備考 / 納期メモ",
-                width="medium"
-            ),
-            "発注判定": st.column_config.TextColumn(
-                "🚀 発注要否判定 (自動)",
-                width="large",
-                disabled=True
-            )
+            "商品名": st.column_config.TextColumn("商品名 (自動)", width="medium", disabled=True),
+            "倉庫名": st.column_config.TextColumn("倉庫名 (自動)", width="small", disabled=True),
+            "受注残数(数量)": st.column_config.NumberColumn("受注残数 (数量)", min_value=0, max_value=999999, step=1, default=0, width="small"),
+            "備考": st.column_config.TextColumn("備考 / 納期メモ", width="medium"),
+            "発注判定": st.column_config.TextColumn("🚀 発注要否判定 (自動)", width="large", disabled=True)
         }
     )
 
@@ -2094,8 +1894,6 @@ with tab3:
         slip_state["grid_df"] = pd.DataFrame(synced_rows)
         slip_state["version"] = int(time.time() * 1000) % 1000000
         st.rerun()
-
-    st.markdown("</div>", unsafe_allow_html=True)
 
     b_col1, b_col2 = st.columns([3.2, 1.0])
     if b_col1.button("💾 この伝票を登録・保存する（クリックで確定）", type="primary", use_container_width=True):
@@ -2159,36 +1957,11 @@ with tab3:
             st.rerun()
 
 with tab4:
-    st.subheader("🔍 Supabase売上データ（sales_data） 品番別・得意先別 検証")
-    if df_sales_filtered.empty:
-        st.info("選択された期間に合致する売上データはありません。")
-    else:
-        chk_c1, chk_c2 = st.columns([1, 2])
-        kw_sales_chk = chk_c1.text_input("品番または得意先名で検索（例: AHL-1400 / ASC-001 / 和気産業）", value="ASC-001")
-        if kw_sales_chk:
-            kw_u = kw_sales_chk.strip().upper()
-            df_s_filt = df_sales_filtered[
-                df_sales_filtered["code_norm"].str.contains(kw_u, na=False) |
-                df_sales_filtered["cust"].str.contains(kw_sales_chk.strip(), case=False, na=False)
-            ]
-        else:
-            df_s_filt = df_sales_filtered
-        chk_c2.metric(f"『{kw_sales_chk or '全商品'}』の期間内売れ数 合計", f"{int(df_s_filt['qty'].sum()):,} 個", f"該当明細行数: {len(df_s_filt):,} 行")
-        st.dataframe(
-            df_s_filt[["date_fmt", "raw_code", "name", "cust", "qty", "price", "amount", "staff"]].rename(
-                columns={"date_fmt": "売上日", "raw_code": "商品コード", "name": "商品名", "cust": "得意先名", "qty": "数量", "price": "単価", "amount": "金額", "staff": "担当者"}
-            ),
-            hide_index=True,
-            use_container_width=True,
-            height=260
-        )
-
-    st.divider()
     ch1, ch2 = st.columns(2)
     with ch1:
         st.subheader("🚢 入荷予定あり・発注済みの商品一覧")
         inc = m_df[(m_df["入荷予定数_ロジザード"] > 0) | (m_df["発注日"] != "") | (m_df["入荷予定日_ロジザード"] != "")].copy()
-        st.dataframe(inc[["品番", "商品区分", "在庫数_ロジザード", "入荷予定数_ロジザード", "入荷予定日_ロジザード", "発注日", "前回決定事項", "決定事項"]], hide_index=True, use_container_width=True, height=450)
+        st.dataframe(inc[["品番", "商品区分", "在庫数_ロジザード", "入荷予定数_ロジザード", "入荷予定日_ロジザード", "発注日", "前回決定事項", "決定事項"]], hide_index=True, use_container_width=True, height=520)
     with ch2:
         st.subheader("📜 過去の会議シート 決定事項 全履歴")
         h_kw = st.text_input("品番・決定内容で検索", placeholder="例: 発注 / 様子見")
