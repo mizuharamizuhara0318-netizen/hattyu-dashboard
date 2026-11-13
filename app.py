@@ -39,8 +39,10 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ご提示いただいたGoogleドライブの発注検討表リンク
+# ① 発注検討表のGoogleドライブURL
 GDRIVE_ORDER_URL = "https://docs.google.com/spreadsheets/d/1JequkGmSRMwoo9rK5HAodfnY6foXl-F2/edit?usp=drive_link"
+# ② 在庫確保（または弥生確保リスト）のGoogleドライブURL（空欄でも同じドライブ内から自動検索します。直接指定したい場合はURLを貼ってください）
+GDRIVE_KAKUHO_URL = ""
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in locals() else "."
 MANUAL_YAYOI_CSV = os.path.join(SCRIPT_DIR, "yayoi_manual_additions.csv")
@@ -121,7 +123,6 @@ def is_future_delivery(ddate_str, note_str, ref_date=None):
 # Googleドライブ接続・ファイル自動取得処理
 # =========================================================
 def get_gdrive_service():
-    """StreamlitのSecretsからサービスアカウント認証情報を自動検出してGoogle Drive APIを初期化"""
     try:
         from google.oauth2 import service_account
         from googleapiclient.discovery import build
@@ -154,8 +155,6 @@ def get_gdrive_service():
     return None
 
 def download_file_by_id(service, file_id: str):
-    """Google Drive API または 公開URL から指定ファイルIDのバイナリを取得"""
-    # 1. Google Drive API経由
     if service is not None:
         from googleapiclient.http import MediaIoBaseDownload
         try:
@@ -166,7 +165,7 @@ def download_file_by_id(service, file_id: str):
             while not done:
                 _, done = downloader.next_chunk()
             if len(fh.getvalue()) > 500:
-                return fh.getvalue(), "Google Drive API (サービスアカウント認証)"
+                return fh.getvalue(), "Google Drive API"
         except Exception:
             try:
                 req = service.files().export_media(
@@ -179,11 +178,10 @@ def download_file_by_id(service, file_id: str):
                 while not done:
                     _, done = downloader.next_chunk()
                 if len(fh.getvalue()) > 500:
-                    return fh.getvalue(), "Google Drive API (スプレッドシート変換)"
+                    return fh.getvalue(), "Google Drive API (スプレッドシート)"
             except Exception:
                 pass
 
-    # 2. リンク共有経由（リンクを知っている全員が閲覧可の場合）
     dl_urls = [
         f"https://docs.google.com/spreadsheets/d/{file_id}/export?format=xlsx",
         f"https://drive.google.com/uc?export=download&id={file_id}",
@@ -194,7 +192,6 @@ def download_file_by_id(service, file_id: str):
             req = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"})
             with urllib.request.urlopen(req, timeout=20) as resp:
                 data = resp.read()
-                # ZIP(xlsx)シグネチャ 'PK' の確認（ログインHTML画面を誤って読まないようにする）
                 if len(data) > 1000 and data[:2] == b'PK':
                     return data, "Googleドライブ共有リンク"
         except Exception:
@@ -202,50 +199,67 @@ def download_file_by_id(service, file_id: str):
     return None, None
 
 @st.cache_data(ttl=3600, show_spinner="☁️ Googleドライブから最新データを同期中...")
-def sync_all_files_from_gdrive(drive_url: str):
-    m = re.search(r'/d/([a-zA-Z0-9_-]+)', drive_url)
-    target_id = m.group(1) if m else ""
+def sync_all_files_from_gdrive(order_url: str, kakuho_url: str = ""):
+    m_ord = re.search(r'/d/([a-zA-Z0-9_-]+)', order_url or "")
+    target_ord_id = m_ord.group(1) if m_ord else ""
+
+    m_kak = re.search(r'/d/([a-zA-Z0-9_-]+)', kakuho_url or "")
+    target_kak_id = m_kak.group(1) if m_kak else ""
+
     service = get_gdrive_service()
 
     result = {
         "main_bytes": None,
         "yayoi_bytes": None,
+        "yayoi_filename": "",
         "comp_bytes": None,
         "item_bytes": None,
         "source_label": "",
         "error_detail": ""
     }
 
-    if target_id:
-        b_main, src_lbl = download_file_by_id(service, target_id)
+    if target_ord_id:
+        b_main, src_lbl = download_file_by_id(service, target_ord_id)
         if b_main:
             result["main_bytes"] = b_main
             result["source_label"] = src_lbl
         else:
             has_secret = "設定あり" if service is not None else "未設定"
-            result["error_detail"] = (
-                f"Googleドライブのファイル(ID: {target_id})にアクセスできませんでした。（Secrets認証: {has_secret}）\n"
-                "👉 解決策: Googleドライブで『発注検討表』を右クリック ＞「共有」＞ 一般的なアクセスを『リンクを知っている全員』に変更するか、"
-                "サービスアカウント(id-840@asahi-dashboard-514301.iam.gserviceaccount.com)に共有してSecretsを設定してください。"
-            )
+            result["error_detail"] = f"発注検討表(ID: {target_ord_id})にアクセスできませんでした。（Secrets認証: {has_secret}）"
 
-    # サービスアカウントが有効な場合、Googleドライブ内の『弥生確保リスト』『弥生会社名』『弥生商品番号』も自動検索して同期
+    if target_kak_id:
+        b_kak, _ = download_file_by_id(service, target_kak_id)
+        if b_kak:
+            result["yayoi_bytes"] = b_kak
+            result["yayoi_filename"] = "Googleドライブ(URL指定)"
+
+    # サービスアカウントでドライブ内の『在庫確保』『弥生確保リスト』『弥生会社名』『弥生商品番号』を自動検索
     if service is not None:
         try:
-            q = "trashed = false and (name contains '発注検討表' or name contains '弥生確保' or name contains '確保リスト' or name contains '弥生会社名' or name contains '弥生商品番号')"
-            res = service.files().list(q=q, pageSize=30, fields="files(id, name, modifiedTime)", orderBy="modifiedTime desc", supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
+            q = "trashed = false and (name contains '在庫確保' or name contains '弥生確保' or name contains '確保リスト' or name contains '発注検討表' or name contains '弥生会社名' or name contains '弥生商品番号')"
+            res = service.files().list(
+                q=q,
+                pageSize=50,
+                fields="files(id, name, modifiedTime)",
+                orderBy="modifiedTime desc",
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True
+            ).execute()
             for f in res.get("files", []):
                 fname = f["name"]
                 fid = f["id"]
+                if fname.startswith("~$"):
+                    continue
                 if result["main_bytes"] is None and "発注検討表" in fname:
                     b, lbl = download_file_by_id(service, fid)
                     if b:
                         result["main_bytes"] = b
-                        result["source_label"] = lbl
-                elif result["yayoi_bytes"] is None and ("弥生確保" in fname or "確保リスト" in fname):
+                        result["source_label"] = f"{lbl}: {fname}"
+                elif result["yayoi_bytes"] is None and any(k in fname for k in ["在庫確保", "弥生確保", "確保リスト"]):
                     b, _ = download_file_by_id(service, fid)
                     if b:
                         result["yayoi_bytes"] = b
+                        result["yayoi_filename"] = f"GDrive: {fname}"
                 elif result["comp_bytes"] is None and ("弥生会社名" in fname or "得意先" in fname):
                     b, _ = download_file_by_id(service, fid)
                     if b:
@@ -369,7 +383,6 @@ def load_excel_master(file_source):
             st.error(f"発注検討表の読み込みエラー: {ex}")
             return pd.DataFrame(), pd.DataFrame(), "前回決定事項", {}, "", {}
 
-    # 『マスター (新) (3)』または最新のシートを自動選択
     target_sheet_name = list(all_sheets.keys())[0]
     if "マスター (新) (3)" in all_sheets:
         target_sheet_name = "マスター (新) (3)"
@@ -380,7 +393,6 @@ def load_excel_master(file_source):
                 break
     target_df = all_sheets[target_sheet_name]
 
-    # 貼り付けシートのSUMIFS合算辞書を作成
     z_free_sum = {}
     z_sec_sum = {}
     if "在庫貼り付け" in all_sheets:
@@ -426,11 +438,13 @@ def load_excel_master(file_source):
             if len(vals) > 14 and clean_str(vals[13]) and clean_str(vals[13]) not in ("行ラベル", "総計", "(空白)"):
                 c_n = normalize_code(vals[13])
                 sheet_yayoi_sum[c_n] = sheet_yayoi_sum.get(c_n, 0) + int(to_num(vals[14]))
+            elif len(vals) > 3 and clean_str(vals[2]) and clean_str(vals[2]) not in ("型番", "100"):
+                c_n_c = normalize_code(vals[2])
+                sheet_yayoi_sum[c_n_c] = sheet_yayoi_sum.get(c_n_c, 0) + int(to_num(vals[3]))
             if len(vals) > 11 and clean_str(vals[9]) and clean_str(vals[9]) != "商品コード":
                 c_n2 = normalize_code(vals[9])
                 sheet_maru_sum[c_n2] = sheet_maru_sum.get(c_n2, 0) + int(to_num(vals[11]))
 
-    # Excel内の最新出荷集計シート（total260724...等）があれば77期（当期出荷数）も取得
     latest_ship_map = {}
     for sname in all_sheets:
         if "total" in str(sname).lower():
@@ -465,6 +479,8 @@ def load_excel_master(file_source):
         elif "入荷予定日" in c and "ndate" not in col_map: col_map["ndate"] = i
         elif "入荷予定" in c and "roji_in" not in col_map: col_map["roji_in"] = i
         elif "ロジザード" in c and ("確保" in c or "在庫確保" in c) and "roji_sec" not in col_map: col_map["roji_sec"] = i
+        elif "丸藤" in c and "maru_sec" not in col_map: col_map["maru_sec"] = i
+        elif ("在庫確保" in c or "弥生" in c) and "ロジザード" not in c and "丸藤" not in c and "yayoi_sec" not in col_map: col_map["yayoi_sec"] = i
         elif ("フリー在庫" in c or "有効数量" in c) and "free" not in col_map: col_map["free"] = i
         elif "回転率" in c and "rate" not in col_map: col_map["rate"] = i
         elif ("リンベル" in c or "ﾘﾝﾍﾞﾙ" in c) and "rinbell" not in col_map: col_map["rinbell"] = i
@@ -485,6 +501,8 @@ def load_excel_master(file_source):
     c_roji_in = col_map.get("roji_in", 17)
     c_ndate = col_map.get("ndate", -1)
     c_roji_sec = col_map.get("roji_sec", 19)
+    c_yayoi_sec = col_map.get("yayoi_sec", 20)
+    c_maru_sec = col_map.get("maru_sec", 21)
     c_rate = col_map.get("rate", 26)
     c_rin = col_map.get("rinbell", 27)
     c_prev = col_map.get("prev_dec", 28)
@@ -512,8 +530,11 @@ def load_excel_master(file_source):
         sec_roji_cell = int(to_num(r[c_roji_sec])) if c_roji_sec < len(r) else 0
         sec_roji = z_sec_sum.get(c_norm, sec_roji_cell) if z_sec_sum.get(c_norm, 0) > 0 else sec_roji_cell
 
-        y_sec_init = sheet_yayoi_sum.get(c_norm, 0)
-        m_sec_init = sheet_maru_sum.get(c_norm, 0)
+        # シート自体に書かれている確保数も初期値として保持（別ファイルが無い場合のフォールバック用）
+        cell_yayoi = int(to_num(r[c_yayoi_sec])) if (0 <= c_yayoi_sec < len(r)) else 0
+        cell_maru = int(to_num(r[c_maru_sec])) if (0 <= c_maru_sec < len(r)) else 0
+        y_sec_init = sheet_yayoi_sum.get(c_norm, cell_yayoi)
+        m_sec_init = sheet_maru_sum.get(c_norm, cell_maru)
 
         free_val = (stock_roji + sec_roji + in_roji) - (y_sec_init + m_sec_init)
         flag_val = free_val - (p1_val + p2_val)
@@ -593,61 +614,86 @@ def load_excel_master(file_source):
 
 @st.cache_data
 def load_yayoi_data(file_bytes_or_path, all_sheets_from_main=None):
+    """
+    『在庫確保.xlsx』または『弥生確保リスト.xlsx』を柔軟に解析して読み込む関数
+    """
     df = pd.DataFrame()
-    sources = [file_bytes_or_path, find_local_file(["弥生確保リスト", "確保リスト"])]
-    for src in sources:
+    used_src_name = ""
+    sources = [
+        (file_bytes_or_path, "Googleドライブ/アップロード"),
+        (find_local_file(["在庫確保"]), "ローカル: 在庫確保.xlsx"),
+        (find_local_file(["弥生確保リスト", "確保リスト"]), "ローカル: 弥生確保リスト.xlsx")
+    ]
+    for src, s_label in sources:
         if src is not None:
             try:
                 src_io = io.BytesIO(src) if isinstance(src, bytes) else src
                 df_raw = pd.read_excel(src_io, sheet_name=0, header=None)
-                h_idx = 4
-                for i in range(min(15, len(df_raw))):
+                if df_raw.empty:
+                    continue
+                h_idx = 0
+                for i in range(min(20, len(df_raw))):
                     row_v = [clean_str(x) for x in df_raw.iloc[i].values]
-                    if "商品コード" in row_v or "得意先名" in row_v:
+                    if any(k in row_v for k in ["商品コード", "品番", "型番", "得意先名", "得意先名称", "受注残数"]):
                         h_idx = i
                         break
                 src_io2 = io.BytesIO(src) if isinstance(src, bytes) else src
-                df = pd.read_excel(src_io2, sheet_name=0, header=h_idx)
-                if not df.empty and ("商品コード" in df.columns or len(df.columns) > 21):
+                df_cand = pd.read_excel(src_io2, sheet_name=0, header=h_idx)
+                if not df_cand.empty:
+                    df = df_cand
+                    used_src_name = s_label
                     break
             except Exception:
                 continue
 
     if not df.empty:
-        col_c_code = "商品コード" if "商品コード" in df.columns else df.columns[13]
-        col_c_qty = "数量" if "数量" in df.columns else df.columns[21]
-        col_c_cust = "得意先名" if "得意先名" in df.columns else df.columns[5]
-        col_c_ord = "受注番号" if "受注番号" in df.columns else df.columns[2]
-        col_c_odate = "受注日" if "受注日" in df.columns else df.columns[1]
-        col_c_ddate = "納入期日" if "納入期日" in df.columns else (df.columns[32] if len(df.columns) > 32 else df.columns[1])
-        col_c_wh = "倉庫名" if "倉庫名" in df.columns else (df.columns[19] if len(df.columns) > 19 else "")
-        col_c_staff = "担当者名" if "担当者名" in df.columns else (df.columns[10] if len(df.columns) > 10 else "")
-        col_c_note = "備考" if "備考" in df.columns else (df.columns[30] if len(df.columns) > 30 else "")
+        cols_str = [clean_str(c) for c in df.columns]
+        def find_col(cands, fallback_idx=None):
+            for cand in cands:
+                for orig_c, clean_c in zip(df.columns, cols_str):
+                    if cand == clean_c or cand in clean_c:
+                        return orig_c
+            if fallback_idx is not None and len(df.columns) > fallback_idx:
+                return df.columns[fallback_idx]
+            return None
 
-        df = df[df[col_c_code].notna()].copy()
-        df["商品コード"] = df[col_c_code].apply(clean_str)
-        df = df[df["商品コード"] != ""]
-        df["得意先名"] = df[col_c_cust].apply(lambda x: clean_str(x) if clean_str(x) else "不明")
-        df["数量"] = pd.to_numeric(df[col_c_qty], errors="coerce").fillna(0).astype(int)
-        df["受注残数"] = df["数量"]
-        df["受注番号"] = df[col_c_ord].apply(clean_str)
-        df["受注日_dt"] = pd.to_datetime(df[col_c_odate], errors="coerce")
-        df["納入期日_dt"] = pd.to_datetime(df[col_c_ddate], errors="coerce")
-        df["受注日"] = df["受注日_dt"].dt.strftime("%Y-%m-%d").fillna("")
-        df["納入期日"] = df["納入期日_dt"].dt.strftime("%Y-%m-%d").fillna("")
-        df["倉庫名"] = df[col_c_wh].apply(clean_str) if col_c_wh in df.columns else ""
-        df["担当者名"] = df[col_c_staff].apply(clean_str) if col_c_staff in df.columns else ""
-        df["備考"] = df[col_c_note].apply(clean_str) if col_c_note in df.columns else ""
+        col_c_code = find_col(["商品コード", "品番", "型番", "機種名"], 13)
+        col_c_qty = find_col(["受注残数", "数量", "確保数", "残数"], 21)
+        col_c_cust = find_col(["得意先名称", "得意先名", "会社名", "得意先"], 5)
+        col_c_ord = find_col(["受注番号", "伝票番号"], 2)
+        col_c_odate = find_col(["受注日", "伝票日付"], 1)
+        col_c_ddate = find_col(["納入期日", "納期"], 32)
+        col_c_wh = find_col(["倉庫名", "倉庫"], 19)
+        col_c_staff = find_col(["担当者名", "担当者", "入力者"], 10)
+        col_c_note = find_col(["備考", "摘要", "メモ"], 30)
 
-        empty_mask = df["受注番号"] == ""
-        if empty_mask.any():
-            df.loc[empty_mask, "受注番号"] = df[empty_mask].apply(
-                lambda r: f"Y-{r['受注日'].replace('-','')}-{abs(hash(r['得意先名']))%10000:04d}", axis=1
-            )
-    else:
-        # 『弥生確保リスト.xlsx』が別ファイルとして無い場合は、発注検討表内の『確保貼り付け』シートから明細を生成
+        if col_c_code is not None and col_c_qty is not None:
+            df = df[df[col_c_code].notna()].copy()
+            df["商品コード"] = df[col_c_code].apply(clean_str)
+            df = df[~df["商品コード"].isin(["", "商品コード", "品番", "型番", "合計", "総計"])]
+            df["得意先名"] = df[col_c_cust].apply(lambda x: clean_str(x) if clean_str(x) else "一般確保") if col_c_cust in df.columns else "一般確保"
+            df["数量"] = df[col_c_qty].apply(lambda x: int(to_num(x)))
+            df = df[df["数量"] != 0].copy()
+            df["受注残数"] = df["数量"]
+            df["受注番号"] = df[col_c_ord].apply(clean_str) if col_c_ord in df.columns else ""
+            df["受注日_dt"] = pd.to_datetime(df[col_c_odate], errors="coerce") if col_c_odate in df.columns else pd.NaT
+            df["納入期日_dt"] = pd.to_datetime(df[col_c_ddate], errors="coerce") if col_c_ddate in df.columns else pd.NaT
+            df["受注日"] = df["受注日_dt"].dt.strftime("%Y-%m-%d").fillna("")
+            df["納入期日"] = df["納入期日_dt"].dt.strftime("%Y-%m-%d").fillna("")
+            df["倉庫名"] = df[col_c_wh].apply(clean_str) if col_c_wh in df.columns else ""
+            df["担当者名"] = df[col_c_staff].apply(clean_str) if col_c_staff in df.columns else ""
+            df["備考"] = df[col_c_note].apply(clean_str) if col_c_note in df.columns else ""
+
+            empty_mask = df["受注番号"] == ""
+            if empty_mask.any():
+                df.loc[empty_mask, "受注番号"] = [f"K-{idx:05d}" for idx in range(1, empty_mask.sum() + 1)]
+        else:
+            df = pd.DataFrame()
+
+    if df.empty:
         fallback_rows = []
         if all_sheets_from_main and "確保貼り付け" in all_sheets_from_main:
+            used_src_name = "発注検討表内の『確保貼り付け』シート"
             df_k = all_sheets_from_main["確保貼り付け"].iloc[4:]
             for idx_k, rk in df_k.iterrows():
                 vals = rk.values
@@ -703,7 +749,7 @@ def load_yayoi_data(file_bytes_or_path, all_sheets_from_main=None):
 
     if not df.empty:
         df = df.sort_values(by=["受注日_dt", "納入期日_dt"], ascending=[False, False], na_position="last")
-    return df
+    return df, used_src_name
 
 # ---------------------------------------------------------
 # ヘッダー ＆ Googleドライブ同期ボタン ＆ アップローダー
@@ -717,19 +763,19 @@ with head_col2:
         st.rerun()
 with head_col3:
     with st.expander("📂 手動アップロード / GDrive設定", expanded=False):
-        gdrive_url_input = st.text_input("☁️ 発注検討表 GoogleドライブURL", value=GDRIVE_ORDER_URL)
+        gdrive_url_input = st.text_input("☁️ ①発注検討表 GoogleドライブURL", value=GDRIVE_ORDER_URL)
+        gdrive_kakuho_input = st.text_input("☁️ ②在庫確保.xlsx GoogleドライブURL (任意)", value=GDRIVE_KAKUHO_URL, placeholder="空欄でも自動検索します。直接指定する場合はURLを貼付")
         u_c1, u_c2 = st.columns(2)
         up_main = u_c1.file_uploader("📋 発注検討表.xlsx", type=["xlsx"], key="up_m")
-        up_yayoi = u_c2.file_uploader("📑 弥生確保リスト.xlsx", type=["xlsx"], key="up_y")
+        up_yayoi = u_c2.file_uploader("📑 在庫確保.xlsx", type=["xlsx"], key="up_y")
         u_c3, u_c4 = st.columns(2)
         up_comp = u_c3.file_uploader("🏢 弥生会社名.xlsx", type=["xlsx"], key="up_comp")
         up_item = u_c4.file_uploader("📦 弥生商品番号.xlsx", type=["xlsx"], key="up_item")
 
-# Googleドライブからの一括同期実行
-gdrive_sync = sync_all_files_from_gdrive(gdrive_url_input)
+gdrive_sync = sync_all_files_from_gdrive(gdrive_url_input, gdrive_kakuho_input)
 
 if gdrive_sync["error_detail"] and up_main is None:
-    st.warning(f"⚠️ **Googleドライブ未接続（現在はバックアップファイルを表示中）**\n{gdrive_sync['error_detail']}")
+    st.warning(f"⚠️ **Googleドライブ未接続**\n{gdrive_sync['error_detail']}")
 
 main_src = up_main if up_main is not None else (gdrive_sync["main_bytes"] if gdrive_sync["main_bytes"] is not None else find_local_file(["発注検討表"]))
 yayoi_src = up_yayoi if up_yayoi is not None else gdrive_sync["yayoi_bytes"]
@@ -737,7 +783,10 @@ comp_src = up_comp if up_comp is not None else gdrive_sync["comp_bytes"]
 item_src = up_item if up_item is not None else gdrive_sync["item_bytes"]
 
 df_main, df_hist, prev_col_title, extra_meta, loaded_sheet_name, all_sheets_raw = load_excel_master(main_src)
-df_yayoi = load_yayoi_data(yayoi_src, all_sheets_raw)
+df_yayoi, yayoi_src_label = load_yayoi_data(yayoi_src, all_sheets_raw)
+if gdrive_sync["yayoi_filename"] and up_yayoi is None:
+    yayoi_src_label = gdrive_sync["yayoi_filename"]
+
 master_comps = load_company_master(comp_src)
 master_items = load_item_master(item_src)
 
@@ -755,7 +804,7 @@ if not df_yayoi.empty:
 
     def is_marufuji_name(name):
         n_clean = str(name).strip().replace(" ", " ")
-        return any(target.replace(" ", " ") in n_clean for target in MARUFUJI_TARGET_NAMES)
+        return any(target.replace(" ", " ") in n_clean for target in MARUFUJI_TARGET_NAMES) or ("丸藤" in n_clean)
 
     df_yayoi["is_maru"] = df_yayoi["得意先名"].apply(is_marufuji_name)
     df_maru_only = df_yayoi[df_yayoi["is_maru"]]
@@ -767,12 +816,17 @@ if not df_yayoi.empty:
     near_totals = df_yayoi[df_yayoi["納期区分"] == "直近"].groupby("品番_正規化")["数量"].sum().to_dict()
     future_totals = df_yayoi[df_yayoi["納期区分"] == "将来"].groupby("品番_正規化")["数量"].sum().to_dict()
 
-    df_main["在庫確保_弥生"] = df_main["品番_正規化"].map(yayoi_non_maru_totals).fillna(0).astype(int)
-    df_main["在庫確保_丸藤"] = df_main["品番_正規化"].map(marufuji_real_totals).fillna(0).astype(int)
-    df_main["直近確保_合計"] = df_main["品番_正規化"].map(near_totals).fillna(0).astype(int)
-    df_main["将来確保_合計"] = df_main["品番_正規化"].map(future_totals).fillna(0).astype(int)
+    # 確保リスト側にデータが存在する品番は最新集計値で更新し、存在しない場合でもシート自体に書かれていた確保数があれば維持する
+    mapped_yayoi = df_main["品番_正規化"].map(yayoi_non_maru_totals)
+    mapped_maru = df_main["品番_正規化"].map(marufuji_real_totals)
 
+    df_main["在庫確保_弥生"] = mapped_yayoi.fillna(df_main["在庫確保_弥生"]).astype(int)
+    df_main["在庫確保_丸藤"] = mapped_maru.fillna(df_main["在庫確保_丸藤"]).astype(int)
+
+    df_main["将来確保_合計"] = df_main["品番_正規化"].map(future_totals).fillna(0).astype(int)
     total_sec_series = df_main["在庫確保_弥生"] + df_main["在庫確保_丸藤"]
+    df_main["直近確保_合計"] = (total_sec_series - df_main["将来確保_合計"]).clip(lower=0)
+
     df_main["確保数のズレ"] = df_main["確保数_ロジザード"] - total_sec_series
 
     df_main["直近フリー在庫"] = (df_main["在庫数_ロジザード"] + df_main["確保数_ロジザード"] + df_main["入荷予定数_ロジザード"]) - df_main["直近確保_合計"]
@@ -815,7 +869,6 @@ target_norm_codes = set(df_main["品番_正規化"].unique())
 df_main["関連会社検索用"] = df_main["品番_正規化"].map(yayoi_comp_search_map).fillna("")
 m_df = df_main.copy()
 
-# 発注抜け防止：弥生確保があるのに発注マスターに未登録の品番を自動検出
 unregistered_list = []
 all_kakuho_check = {}
 if not df_yayoi.empty:
@@ -848,11 +901,11 @@ if df_hist is not None and not df_hist.empty:
     for p_code, grp in df_hist.groupby("品番", sort=False):
         hist_dict[p_code] = grp.sort_values("会議日", ascending=False)[["会議日", "決定事項"]].to_dict(orient="records")
 
-src_status = f"✅ Googleドライブ同期完了 ({gdrive_sync['source_label']})" if gdrive_sync["main_bytes"] is not None else "📂 ローカル/アップロードファイル参照中"
+src_status = f"✅ Googleドライブ同期完了 ({gdrive_sync['source_label']})" if gdrive_sync["main_bytes"] is not None else "📂 ローカル参照中"
 st.caption(
     f"**{src_status}** ｜ 参照シート: **{loaded_sheet_name}** ({len(m_df):,} 品番) ｜ "
-    f"🚨 直近要発注: **{int((m_df['直近検討フラグ'] < 0).sum())}** 件 ／ 将来含め要発注: **{int((m_df['発注検討フラグ'] < 0).sum())}** 件 ／ "
-    f"マスター未登録アラート: **{len(df_unreg)}** 件"
+    f"📑 確保データ元: **{yayoi_src_label or '未検出'}** ({len(df_yayoi):,} 明細) ｜ "
+    f"🚨 直近要発注: **{int((m_df['直近検討フラグ'] < 0).sum())}** 件 ／ ⚠️ 将来含め要発注: **{int((m_df['発注検討フラグ'] < 0).sum())}** 件"
 )
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
@@ -2054,7 +2107,7 @@ with tab5:
 
     st.divider()
     st.subheader(f"🚨 発注抜け防止アラート：弥生確保があるのに発注検討マスターに未登録の商品（{len(df_unreg)}件）")
-    st.caption("『弥生確保リスト』や『確保貼り付け』に受注残があるにもかかわらず、『マスター (新) (3)』に品番が登録されていないため定期発注チェックから漏れている一覧です。")
+    st.caption("『在庫確保.xlsx』や『弥生確保リスト』に受注残があるにもかかわらず、発注検討マスターに品番が登録されていないため定期発注チェックから漏れている一覧です。")
     if df_unreg.empty:
         st.success("✅ 現在、マスター未登録の確保商品は0件です。抜け漏れはありません。")
     else:
