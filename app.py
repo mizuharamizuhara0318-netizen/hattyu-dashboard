@@ -12,6 +12,12 @@ import re
 import math
 import urllib.request
 
+try:
+    from supabase import create_client, Client
+except ImportError:
+    create_client = None
+    Client = None
+
 st.set_page_config(page_title="発注検討表 ＆ 弥生受注管理システム（Googleドライブ完全連動版）", layout="wide")
 
 st.markdown("""
@@ -44,6 +50,9 @@ GDRIVE_ORDER_URL = "https://docs.google.com/spreadsheets/d/1JequkGmSRMwoo9rK5HAo
 # ② 在庫確保.xlsx のGoogleドライブURL（空欄でも同じGoogleドライブ内から自動検索します）
 GDRIVE_KAKUHO_URL = ""
 
+SUPABASE_URL = "https://zyeemvbskaefbtfxurdw.supabase.co"
+SUPABASE_KEY = "sb_publishable_S19HrcRBy63BGNbsSq69Xg_pZ05d3Z3"
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in locals() else "."
 MANUAL_YAYOI_CSV = os.path.join(SCRIPT_DIR, "yayoi_manual_additions.csv")
 
@@ -72,10 +81,6 @@ def clean_str(val):
     return s
 
 def parse_jp_date(val):
-    """
-    『2027年01月12日』『2026/12/23』『2026-12-23』などあらゆる日付形式を
-    確実に認識して (Timestamp, 'YYYY-MM-DD') に変換する関数
-    """
     if is_na_val(val):
         return pd.NaT, ""
     if isinstance(val, (datetime.datetime, datetime.date, pd.Timestamp)):
@@ -84,7 +89,6 @@ def parse_jp_date(val):
     s = clean_str(val)
     if not s:
         return pd.NaT, ""
-    # 「2027年01月12日」→「2027-01-12」に変換
     s_norm = re.sub(r'(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日?', r'\1-\2-\3', s)
     s_norm = s_norm.replace("/", "-").split(" ")[0]
     dt = pd.to_datetime(s_norm, errors="coerce")
@@ -118,10 +122,6 @@ def to_num(val):
         return 0.0
 
 def fix_corrupted_xlsx_filters(xlsx_bytes: bytes) -> io.BytesIO:
-    """
-    Excelファイル（発注検討表や在庫確保.xlsx）にオートフィルターがかかっていても
-    エラーにならず全行（非表示行含む）を読み込めるようにメモリ上で修復する関数
-    """
     in_mem = io.BytesIO(xlsx_bytes)
     out_mem = io.BytesIO()
     try:
@@ -141,7 +141,6 @@ def fix_corrupted_xlsx_filters(xlsx_bytes: bytes) -> io.BytesIO:
         return in_mem
 
 def read_excel_safely(src, sheet_name=0, header=None):
-    """どんなExcelファイル（フィルター付き・破損XML付き）でも確実にDataFrameとして読み込む"""
     raw_bytes = None
     if isinstance(src, bytes):
         raw_bytes = src
@@ -265,6 +264,7 @@ def sync_all_files_from_gdrive(order_url: str, kakuho_url: str = ""):
         "yayoi_filename": "",
         "comp_bytes": None,
         "item_bytes": None,
+        "sales_files": [],
         "source_label": "",
         "error_detail": ""
     }
@@ -286,10 +286,10 @@ def sync_all_files_from_gdrive(order_url: str, kakuho_url: str = ""):
 
     if service is not None:
         try:
-            q = "trashed = false and (name contains '在庫確保' or name contains '弥生確保' or name contains '確保リスト' or name contains '発注検討表' or name contains '弥生会社名' or name contains '弥生商品番号')"
+            q = "trashed = false and (name contains '在庫確保' or name contains '弥生確保' or name contains '確保リスト' or name contains '発注検討表' or name contains '弥生会社名' or name contains '弥生商品番号' or name contains '売上' or name contains '出荷' or name contains 'sales')"
             res = service.files().list(
                 q=q,
-                pageSize=50,
+                pageSize=60,
                 fields="files(id, name, modifiedTime)",
                 orderBy="modifiedTime desc",
                 supportsAllDrives=True,
@@ -297,7 +297,6 @@ def sync_all_files_from_gdrive(order_url: str, kakuho_url: str = ""):
             ).execute()
             files_list = res.get("files", [])
 
-            # 『在庫確保』という名前のファイルを最優先で探す
             for f in files_list:
                 fname = f["name"]
                 fid = f["id"]
@@ -333,6 +332,10 @@ def sync_all_files_from_gdrive(order_url: str, kakuho_url: str = ""):
                     b, _ = download_file_by_id(service, fid)
                     if b:
                         result["item_bytes"] = b
+                elif len(result["sales_files"]) < 8 and any(k in fname.lower() for k in ["売上", "出荷", "sales"]) and fname.lower().endswith((".csv", ".xlsx")):
+                    b, _ = download_file_by_id(service, fid)
+                    if b:
+                        result["sales_files"].append((fname, b))
         except Exception:
             pass
 
@@ -344,6 +347,172 @@ def find_local_file(keywords, ext=".xlsx"):
             if any(k in fn for k in keywords):
                 return os.path.join(SCRIPT_DIR, fn)
     return None
+
+# =========================================================
+# 実績（購入先）データの自動集計処理（GDrive売上ファイル / Supabase対応）
+# =========================================================
+def parse_sales_df_from_bytes(fname: str, raw_bytes: bytes) -> pd.DataFrame:
+    df = pd.DataFrame()
+    if fname.lower().endswith(".csv"):
+        for enc in ["utf-8-sig", "cp932", "shift_jis", "utf-8"]:
+            try:
+                df = pd.read_csv(io.BytesIO(raw_bytes), encoding=enc, low_memory=False)
+                if not df.empty and len(df.columns) >= 3:
+                    break
+            except Exception:
+                continue
+    else:
+        df = read_excel_safely(raw_bytes, sheet_name=0, header=0)
+
+    if df.empty:
+        return pd.DataFrame()
+
+    cols_str = [clean_str(c) for c in df.columns]
+    def f_col(cands):
+        for cand in cands:
+            for orig_c, clean_c in zip(df.columns, cols_str):
+                if cand == clean_c or cand in clean_c:
+                    return orig_c
+        return None
+
+    c_code = f_col(["商品コード", "品番", "型番", "code"])
+    c_cust = f_col(["得意先名称", "得意先名", "会社名", "販売先", "顧客名", "cust"])
+    c_qty = f_col(["数量", "売上数", "出荷数", "個数", "qty"])
+    c_amt = f_col(["金額", "売上金額", "税抜金額", "amount"])
+    c_dt = f_col(["売上日", "出荷日", "伝票日付", "日付", "date"])
+    c_stf = f_col(["担当者名", "担当者", "staff"])
+
+    if c_code is None or c_cust is None or c_qty is None:
+        return pd.DataFrame()
+
+    out = pd.DataFrame()
+    out["code_norm"] = df[c_code].apply(normalize_code)
+    out["cust"] = df[c_cust].apply(lambda x: clean_str(x) if clean_str(x) else "（得意先名なし）")
+    out["qty"] = df[c_qty].apply(to_num)
+    out["amount"] = df[c_amt].apply(to_num) if c_amt is not None else 0.0
+    out["staff"] = df[c_stf].apply(clean_str) if c_stf is not None else ""
+
+    if c_dt is not None:
+        parsed_d = df[c_dt].apply(parse_jp_date)
+        out["dt"] = [p[0] for p in parsed_d]
+        out["date_fmt"] = [p[1] for p in parsed_d]
+    else:
+        out["dt"] = pd.NaT
+        out["date_fmt"] = ""
+
+    out = out[(out["code_norm"] != "") & (out["qty"] != 0)].copy()
+
+    # 期（74期〜77期）の自動判定（7月〜翌6月）
+    def calc_ki(ts):
+        if pd.isna(ts):
+            return "全期間"
+        fy = ts.year if ts.month >= 7 else ts.year - 1
+        # 2023/7〜2024/6 = 74期, 2024/7〜2025/6 = 75期, 2025/7〜2026/6 = 76期, 2026/7〜 = 77期
+        ki_num = fy - 1949
+        return f"{ki_num}期"
+
+    out["ki"] = out["dt"].apply(calc_ki)
+    return out
+
+@st.cache_data(ttl=3600)
+def build_sales_purchase_maps(sales_files_list, up_sales_bytes, up_sales_name, target_codes_tuple):
+    target_set = set(target_codes_tuple)
+    dfs = []
+
+    if up_sales_bytes is not None and up_sales_name:
+        df_u = parse_sales_df_from_bytes(up_sales_name, up_sales_bytes)
+        if not df_u.empty:
+            dfs.append(df_u)
+
+    for fn, b in (sales_files_list or []):
+        df_g = parse_sales_df_from_bytes(fn, b)
+        if not df_g.empty:
+            dfs.append(df_g)
+
+    # もしGDriveやアップロードに売上明細が無い場合、Supabaseが生きていればサイレント取得を試みる（エラーは一切出さない）
+    if not dfs and create_client is not None:
+        try:
+            sb = create_client(SUPABASE_URL, SUPABASE_KEY)
+            res = sb.table("sales_data").select("商品コード, 得意先名, 担当者, 数量, 金額, 日付").order("日付", desc=True).limit(50000).execute()
+            if res.data:
+                df_sb = pd.DataFrame(res.data)
+                df_sb_parsed = parse_sales_df_from_bytes("supabase.csv", df_sb.to_csv(index=False).encode("utf-8"))
+                if not df_sb_parsed.empty:
+                    dfs.append(df_sb_parsed)
+        except Exception:
+            pass
+
+    if not dfs:
+        return {}, {}, ""
+
+    df_all = pd.concat(dfs, ignore_index=True)
+    df_all = df_all[df_all["code_norm"].isin(target_set)].copy()
+    if df_all.empty:
+        return {}, {}, ""
+
+    comp_map = {}
+    det_map = {}
+
+    # 1. 全期間集計 ("ALL") と 期別集計 ("74期", "75期", "76期", "77期") を両方作成
+    for c_norm, grp_code in df_all.groupby("code_norm", sort=False):
+        comp_map[c_norm] = {}
+        det_map[c_norm] = {}
+
+        # 全期間ランキング
+        c_grp_all = (
+            grp_code.groupby("cust", as_index=False)
+            .agg(qty=("qty", "sum"), amount=("amount", "sum"), cnt=("cust", "count"), last_date=("date_fmt", "max"))
+            .sort_values("qty", ascending=False)
+        )
+        tot_all = c_grp_all["qty"].sum()
+        comp_map[c_norm]["ALL"] = [
+            {
+                "得意先名": r["cust"],
+                "数量": int(round(r["qty"])),
+                "構成比": f"{round(r['qty'] / tot_all * 100, 1) if tot_all > 0 else 0}%",
+                "金額": int(round(r["amount"])),
+                "伝票回数": int(r["cnt"]),
+                "最終売上日": str(r["last_date"] or "—")
+            }
+            for _, r in c_grp_all.head(50).iterrows()
+        ]
+
+        # 期別ランキング
+        for ki_label, grp_ki in grp_code.groupby("ki", sort=False):
+            c_grp_k = (
+                grp_ki.groupby("cust", as_index=False)
+                .agg(qty=("qty", "sum"), amount=("amount", "sum"), cnt=("cust", "count"), last_date=("date_fmt", "max"))
+                .sort_values("qty", ascending=False)
+            )
+            tot_k = c_grp_k["qty"].sum()
+            comp_map[c_norm][ki_label] = [
+                {
+                    "得意先名": r["cust"],
+                    "数量": int(round(r["qty"])),
+                    "構成比": f"{round(r['qty'] / tot_k * 100, 1) if tot_k > 0 else 0}%",
+                    "金額": int(round(r["amount"])),
+                    "伝票回数": int(r["cnt"]),
+                    "最終売上日": str(r["last_date"] or "—")
+                }
+                for _, r in c_grp_k.head(50).iterrows()
+            ]
+
+        # 最新伝票明細
+        grp_sorted = grp_code.sort_values("date_fmt", ascending=False)
+        det_map[c_norm] = [
+            {
+                "期": r["ki"],
+                "日付": str(r["date_fmt"] or "—"),
+                "得意先名": r["cust"],
+                "数量": int(round(r["qty"])),
+                "金額": int(round(r["amount"])),
+                "担当者": str(r["staff"] or "")
+            }
+            for _, r in grp_sorted.head(50).iterrows()
+        ]
+
+    src_info = f"売上データ連動済 ({len(df_all):,} 明細)"
+    return comp_map, det_map, src_info
 
 @st.cache_data
 def load_company_master(file_bytes_or_path):
@@ -651,10 +820,6 @@ def load_excel_master(file_source):
 
 @st.cache_data
 def load_yayoi_data(file_bytes_or_path, all_sheets_from_main=None):
-    """
-    オートフィルター付きの『在庫確保.xlsx』や『2027年01月12日』といった日付も
-    1行も漏らさず読み込む強化版関数
-    """
     df = pd.DataFrame()
     used_src_name = ""
     sources = [
@@ -713,7 +878,6 @@ def load_yayoi_data(file_bytes_or_path, all_sheets_from_main=None):
             df["受注残数"] = df["数量"]
             df["受注番号"] = df[col_c_ord].apply(clean_str) if col_c_ord in df.columns else ""
 
-            # 2027年01月12日 などの日本語日付を確実にパース（未来日付も一切除外しない）
             if col_c_odate in df.columns:
                 parsed_o = df[col_c_odate].apply(parse_jp_date)
                 df["受注日_dt"] = [p[0] for p in parsed_o]
@@ -740,7 +904,6 @@ def load_yayoi_data(file_bytes_or_path, all_sheets_from_main=None):
         else:
             df = pd.DataFrame()
 
-    # 発注検討表の『確保貼り付け』シートにある明細で、万が一『在庫確保.xlsx』に載っていない品番があれば補完する
     if all_sheets_from_main and "確保貼り付け" in all_sheets_from_main:
         existing_codes = set(df["商品コード"].apply(normalize_code)) if not df.empty else set()
         supp_rows = []
@@ -804,7 +967,6 @@ def load_yayoi_data(file_bytes_or_path, all_sheets_from_main=None):
             pass
 
     if not df.empty:
-        # 2027年などの未来の受注日も一番上に来るように降順ソート
         df = df.sort_values(by=["受注日_dt", "納入期日_dt"], ascending=[False, False], na_position="last")
     return df, used_src_name
 
@@ -828,6 +990,7 @@ with head_col3:
         u_c3, u_c4 = st.columns(2)
         up_comp = u_c3.file_uploader("🏢 弥生会社名.xlsx", type=["xlsx"], key="up_comp")
         up_item = u_c4.file_uploader("📦 弥生商品番号.xlsx", type=["xlsx"], key="up_item")
+        up_sales = st.file_uploader("🔥 売上明細データ (CSV / Excel ※購入先内訳用・任意)", type=["csv", "xlsx"], key="up_sales")
 
 gdrive_sync = sync_all_files_from_gdrive(gdrive_url_input, gdrive_kakuho_input)
 
@@ -854,6 +1017,7 @@ if df_main.empty:
 marufuji_dict = {}
 yayoi_dict = {}
 yayoi_comp_search_map = {}
+yayoi_cust_rank_map = {}
 
 if not df_yayoi.empty:
     df_yayoi["品番_正規化"] = df_yayoi["商品コード"].apply(normalize_code)
@@ -866,7 +1030,6 @@ if not df_yayoi.empty:
     df_maru_only = df_yayoi[df_yayoi["is_maru"]]
     df_non_maru = df_yayoi[~df_yayoi["is_maru"]]
 
-    # 2027年など未来の受注分も含めて全期間・全行をSUMIFS合算
     yayoi_non_maru_totals = df_non_maru.groupby("品番_正規化")["数量"].sum().to_dict()
     marufuji_real_totals = df_maru_only.groupby("品番_正規化")["数量"].sum().to_dict()
 
@@ -888,6 +1051,20 @@ if not df_yayoi.empty:
         maru_grp = grp_sorted[grp_sorted["is_maru"]]
         if not maru_grp.empty:
             marufuji_dict[code_n] = maru_grp[["受注番号", "得意先名", "数量", "受注日", "納入期日", "倉庫名", "備考", "担当者名"]].to_dict(orient="records")
+
+        # 得意先別の受注確保ランキング（実績クリック時の参考表示にも利用）
+        c_rank = grp.groupby("得意先名", as_index=False).agg(qty=("数量", "sum"), cnt=("受注番号", "count"), last_dt=("受注日", "max")).sort_values("qty", ascending=False)
+        tot_q = c_rank["qty"].sum()
+        yayoi_cust_rank_map[code_n] = [
+            {
+                "得意先名": r_c["得意先名"],
+                "数量": int(r_c["qty"]),
+                "構成比": f"{round(r_c['qty'] / tot_q * 100, 1) if tot_q > 0 else 0}%",
+                "伝票回数": int(r_c["cnt"]),
+                "最終受注日": str(r_c["last_dt"] or "—")
+            }
+            for _, r_c in c_rank.iterrows()
+        ]
 
 item_wh_map = {}
 item_name_map = {}
@@ -911,7 +1088,13 @@ for _, r in df_main.iterrows():
         item_wh_map[ic_n] = wh_def
         item_name_map[ic] = clean_str(r["商品区分"])
 
-target_norm_codes = set(df_main["品番_正規化"].unique())
+target_norm_codes = tuple(sorted(df_main["品番_正規化"].unique()))
+up_sales_bytes = up_sales.getvalue() if up_sales is not None else None
+up_sales_name = up_sales.name if up_sales is not None else ""
+sales_comp_map, sales_det_map, sales_src_info = build_sales_purchase_maps(
+    gdrive_sync.get("sales_files", []), up_sales_bytes, up_sales_name, target_norm_codes
+)
+
 df_main["関連会社検索用"] = df_main["品番_正規化"].map(yayoi_comp_search_map).fillna("")
 m_df = df_main.copy()
 
@@ -927,7 +1110,7 @@ else:
         all_kakuho_check[c_n] = all_kakuho_check.get(c_n, 0) + q
 
 for c_n, k_qty in all_kakuho_check.items():
-    if k_qty > 0 and c_n not in target_norm_codes:
+    if k_qty > 0 and c_n not in set(target_norm_codes):
         z_f = extra_meta.get("z_free_sum", {}).get(c_n, 0)
         n_q = extra_meta.get("nyuka_sum", {}).get(c_n, 0)
         p_nm = item_name_map.get(c_n) or extra_meta.get("prod_name_sheet_map", {}).get(c_n, "マスター未登録（特注/枝番）")
@@ -948,14 +1131,16 @@ if df_hist is not None and not df_hist.empty:
         hist_dict[p_code] = grp.sort_values("会議日", ascending=False)[["会議日", "決定事項"]].to_dict(orient="records")
 
 src_status = f"✅ Googleドライブ同期完了 ({gdrive_sync['source_label']})" if gdrive_sync["main_bytes"] is not None else "📂 ローカル参照中"
+zure_count = int((m_df["確保数のズレ"] != 0).sum())
 st.caption(
     f"**{src_status}** ｜ 参照シート: **{loaded_sheet_name}** ({len(m_df):,} 品番) ｜ "
-    f"📑 確保データ元: **{yayoi_src_label or '未検出'}** (全 **{len(df_yayoi):,}** 行・2027年以降の先行確保も全件反映済) ｜ "
-    f"🚨 要発注（検討フラグがマイナス）: **{int((m_df['発注検討フラグ'] < 0).sum())}** 件"
+    f"📑 確保データ元: **{yayoi_src_label or '未検出'}** (全 **{len(df_yayoi):,}** 行) ｜ "
+    f"⚖️ 確保ズレあり: **{zure_count}** 件 ｜ 🚨 要発注: **{int((m_df['発注検討フラグ'] < 0).sum())}** 件"
+    + (f" ｜ 🔥 {sales_src_info}" if sales_src_info else "")
 )
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    f"📋 1. 発注検討表（SUMIFS完全合算 ＆ 高速検索）",
+    f"📋 1. 発注検討表（ズレ診断POP ＆ 実績購入先POP搭載）",
     "🏢 2. 会社（得意先）別・受注番号別 確保リスト",
     "💻 3. 弥生受注伝票（リアルタイム発注判定つき）",
     "🕒 4. 入荷予定 ＆ 過去の会議決定履歴",
@@ -968,6 +1153,9 @@ with tab1:
     records_json = json.dumps(m_df.to_dict(orient="records"), ensure_ascii=False)
     yayoi_json = json.dumps(yayoi_dict, ensure_ascii=False)
     marufuji_json = json.dumps(marufuji_dict, ensure_ascii=False)
+    yayoi_rank_json = json.dumps(yayoi_cust_rank_map, ensure_ascii=False)
+    sales_comp_json = json.dumps(sales_comp_map, ensure_ascii=False)
+    sales_det_json = json.dumps(sales_det_map, ensure_ascii=False)
     hist_json = json.dumps(hist_dict, ensure_ascii=False)
     prev_title_html = prev_col_title.replace("(", "<br>(")
 
@@ -1033,11 +1221,13 @@ with tab1:
         .bg-pink-rate {{ background-color: #fbcfe8 !important; color: #be123c; font-weight: bold; }}
         .bg-yellow-ro {{ background-color: #fef08a !important; color: #1e293b; }}
         .bg-yellow-edit {{ background-color: #ffff00 !important; }}
-        .bg-hist-ki {{ background-color: #f1f5f9; color: #475569; }}
+        .bg-hist-ki {{ background-color: #f1f5f9; color: #334155; }}
         .bg-zure-diff {{ background-color: #ffe4e6 !important; color: #be123c; font-weight: bold; }}
 
         tbody tr:hover td {{ filter: brightness(0.95); }}
         .click-link {{ color: #0284c7; font-weight: bold; text-decoration: underline; cursor: pointer; display: block; width: 100%; }}
+        .click-link-ki {{ color: #1e40af; font-weight: bold; text-decoration: underline; cursor: pointer; display: block; width: 100%; }}
+        .click-link-zure {{ color: #be123c; font-weight: bold; text-decoration: underline; cursor: pointer; display: block; width: 100%; }}
         .cell-input {{ width: 100%; height: 23px; border: 1px solid #94a3b8; border-radius: 2px; padding: 1px 4px; font-size: 12px; background: rgba(255,255,255,0.9); }}
         .cell-input-point {{ width: 100%; height: 23px; border: 1px solid #3b82f6; border-radius: 2px; padding: 1px 4px; font-size: 12px; font-weight: bold; text-align: right; background: #eff6ff; }}
 
@@ -1065,6 +1255,7 @@ with tab1:
         .sub-table th {{ background: #e2e8f0; color: #1e293b; padding: 8px 10px; font-size: 14px; height: auto; position: static; border: 1px solid #cbd5e1; }}
         .sub-table td {{ padding: 8px 10px; font-size: 14px; height: auto; border: 1px solid #cbd5e1; }}
         .sec-title {{ font-size: 16px; font-weight: bold; color: #1e3a8a; margin-bottom: 8px; border-bottom: 2px solid #93c5fd; padding-bottom: 4px; }}
+        .diag-box {{ padding: 14px 18px; border-radius: 8px; margin-bottom: 14px; font-size: 14.5px; line-height: 1.6; }}
     </style>
     </head>
     <body>
@@ -1074,9 +1265,9 @@ with tab1:
             <select id="js-filter-mode" class="filter-select" onchange="applyInstantFilter()">
                 <option value="all">すべて表示（Excelと同じ並び）</option>
                 <option value="need_order">🚨 要発注（発注検討フラグがマイナスのみ）</option>
-                <option value="zure">確保数のズレがある商品</option>
-                <option value="incoming">入荷予定がある商品</option>
-                <option value="secured">弥生確保または丸藤確保がある商品</option>
+                <option value="zure">⚖️ 確保数のズレがある商品のみ</option>
+                <option value="incoming">🚢 入荷予定がある商品</option>
+                <option value="secured">🏢 弥生確保または丸藤確保がある商品</option>
             </select>
         </div>
         <div class="filter-group">
@@ -1092,7 +1283,7 @@ with tab1:
     </div>
 
     <div class="toolbar">
-        <div class="toolbar-info">表示件数: <span id="row-count">0</span> 件 ｜ 💡 「品番」や「在庫確保」の数字をクリックすると、2027年以降の先行予約も含めた確保内訳POPが開きます！</div>
+        <div class="toolbar-info">表示件数: <span id="row-count">0</span> 件 ｜ 💡 「74〜77期実績」クリックで購入先内訳、「確保数のズレ」クリックでズレ原因＆全ズレ商品リストが開きます！</div>
         <button class="btn-download" onclick="exportEditedCSV()">📥 編集内容を反映したCSV出力</button>
     </div>
     <div class="table-wrap">
@@ -1103,10 +1294,10 @@ with tab1:
                     <th class="w-center sticky-col-2">商品<br>センター</th>
                     <th class="w-code sticky-col-3">品番</th>
                     <th class="w-name sticky-col-4">商品区分</th>
-                    <th class="w-num bg-hist-ki">74期<br>実績</th>
-                    <th class="w-num bg-hist-ki">75期<br>実績</th>
-                    <th class="w-num bg-hist-ki">76期<br>実績</th>
-                    <th class="w-num bg-hist-ki">77期<br>今期出荷</th>
+                    <th class="w-num bg-hist-ki">74期<br>実績<br><span style="color:#1d4ed8; font-size:10px;">🔍購入先</span></th>
+                    <th class="w-num bg-hist-ki">75期<br>実績<br><span style="color:#1d4ed8; font-size:10px;">🔍購入先</span></th>
+                    <th class="w-num bg-hist-ki">76期<br>実績<br><span style="color:#1d4ed8; font-size:10px;">🔍購入先</span></th>
+                    <th class="w-num bg-hist-ki">77期<br>今期出荷<br><span style="color:#1d4ed8; font-size:10px;">🔍購入先</span></th>
                     <th class="w-num" style="background:#e0f2fe;">1課発注点<br><span style="color:#0369a1; font-size:10px;">✏️手動修正可</span></th>
                     <th class="w-num" style="background:#e0f2fe;">2課発注点<br><span style="color:#0369a1; font-size:10px;">✏️手動修正可</span></th>
                     <th class="w-num bg-cyan">在庫数<br><span class="red-txt">ロジザード</span></th>
@@ -1115,7 +1306,7 @@ with tab1:
                     <th class="w-num bg-cyan">確保数<br><span class="red-txt">ロジザード<br>(在庫確保)</span></th>
                     <th class="w-num bg-cyan">在庫確保<br><span class="red-txt">(弥生)</span></th>
                     <th class="w-num bg-cyan">在庫確保<br><span style="color:#b91c1c; font-weight:bold;">丸藤</span></th>
-                    <th class="w-num bg-cyan">確保数の<br>ズレ</th>
+                    <th class="w-num bg-cyan">確保数の<br>ズレ<br><span class="red-txt">🔍ズレ一覧</span></th>
                     <th class="w-num bg-cyan">入荷後の<br>フリー在庫</th>
                     <th class="w-num">発注検討<br>フラグ<br><span class="red-txt">マイナスの<br>場合発注検討</span></th>
                     <th class="w-num">在庫回転<br>率</th>
@@ -1132,10 +1323,12 @@ with tab1:
     <div class="modal-overlay" id="detail-modal" onclick="closeModalOnBg(event)">
         <div class="modal-window">
             <div class="modal-header">
-                <div class="modal-title" id="modal-title-text">📦 品番詳細・確保内訳データ</div>
-                <div style="display:flex; gap:10px; align-items:center;">
-                    <button class="mode-btn" id="btn-mode-yayoi" onclick="switchModalMode('yayoi')">🏢 弥生確保リスト（すべて）</button>
-                    <button class="mode-btn" id="btn-mode-maru" onclick="switchModalMode('marufuji')">🏢 丸藤確保のみ表示</button>
+                <div class="modal-title" id="modal-title-text">📦 品番詳細・内訳データ</div>
+                <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                    <button class="mode-btn" id="btn-mode-sales" onclick="switchModalMode('sales', 'ALL')">🔥 購入先（売上実績）内訳</button>
+                    <button class="mode-btn" id="btn-mode-zure" onclick="switchModalMode('zure', '')">⚖️ 確保ズレ診断＆全ズレ商品一覧</button>
+                    <button class="mode-btn" id="btn-mode-yayoi" onclick="switchModalMode('yayoi', '')">🏢 弥生確保リスト（すべて）</button>
+                    <button class="mode-btn" id="btn-mode-maru" onclick="switchModalMode('marufuji', '')">🏢 丸藤確保のみ表示</button>
                     <button class="modal-close" onclick="closeModal()">✕ 閉じる</button>
                 </div>
             </div>
@@ -1149,6 +1342,7 @@ with tab1:
                             <button class="stamp-btn" onclick="addStamp('様子見')">＋様子見</button>
                             <button class="stamp-btn" onclick="addStamp('発注済')">＋発注済</button>
                             <button class="stamp-btn" onclick="addStamp('確認中')">＋確認中</button>
+                            <button class="stamp-btn" onclick="addStamp('ロジ修正済')">＋ロジ修正済</button>
                             <button class="stamp-btn" onclick="addStamp('廃盤予定')">＋廃盤予定</button>
                         </span>
                     </div>
@@ -1165,7 +1359,7 @@ with tab1:
                 </div>
                 <div class="modal-grid">
                     <div>
-                        <div class="sec-title" id="modal-sub-title">🏢 確保明細リスト</div>
+                        <div class="sec-title" id="modal-sub-title">🏢 詳細リスト</div>
                         <div id="modal-yayoi-area"></div>
                     </div>
                     <div>
@@ -1182,9 +1376,13 @@ with tab1:
         const centerOptions = {centers_json};
         const yayoiMap = {yayoi_json};
         const marufujiMap = {marufuji_json};
+        const yayoiRankMap = {yayoi_rank_json};
+        const salesCompMap = {sales_comp_json};
+        const salesDetMap = {sales_det_json};
         const histMap = {hist_json};
         let currentModalIdx = null;
         let currentModalMode = "yayoi";
+        let currentKiFilter = "ALL";
         let visibleIndices = [];
 
         const centerSel = document.getElementById("js-filter-center");
@@ -1290,25 +1488,26 @@ with tab1:
                 const rateCls = (rateVal <= 5) ? "bg-pink-rate" : "bg-green";
                 const zureVal = Number(r["確保数のズレ"] || 0);
                 const zureCls = (zureVal !== 0) ? "bg-zure-diff" : "bg-cyan";
+                const zureLinkCls = (zureVal !== 0) ? "click-link-zure" : "click-link";
 
                 html += `<tr>
                     <td class="w-no sticky-col-1">${{r["No"]}}</td>
                     <td class="w-center sticky-col-2">${{r["商品センター"]}}</td>
-                    <td class="w-code sticky-col-3" title="${{r["品番"]}}"><span class="click-link" onclick="openModal(${{idx}}, 'yayoi')">${{r["品番"]}}</span></td>
+                    <td class="w-code sticky-col-3" title="${{r["品番"]}}"><span class="click-link" onclick="openModal(${{idx}}, 'yayoi', '')">${{r["品番"]}}</span></td>
                     <td class="w-name sticky-col-4" title="${{r["商品区分"]}}">${{r["商品区分"]}}</td>
-                    <td class="w-num bg-hist-ki">${{fmtNum(r["74期"])}}</td>
-                    <td class="w-num bg-hist-ki">${{fmtNum(r["75期"])}}</td>
-                    <td class="w-num bg-hist-ki">${{fmtNum(r["76期"])}}</td>
-                    <td class="w-num bg-hist-ki" style="font-weight:bold; color:#0f172a;">${{fmtNum(r["77期"])}}</td>
+                    <td class="w-num bg-hist-ki"><span class="click-link-ki" onclick="openModal(${{idx}}, 'sales', '74期')">${{fmtNum(r["74期"])}}</span></td>
+                    <td class="w-num bg-hist-ki"><span class="click-link-ki" onclick="openModal(${{idx}}, 'sales', '75期')">${{fmtNum(r["75期"])}}</span></td>
+                    <td class="w-num bg-hist-ki"><span class="click-link-ki" onclick="openModal(${{idx}}, 'sales', '76期')">${{fmtNum(r["76期"])}}</span></td>
+                    <td class="w-num bg-hist-ki"><span class="click-link-ki" style="color:#0f172a;" onclick="openModal(${{idx}}, 'sales', '77期')">${{fmtNum(r["77期"])}}</span></td>
                     <td class="w-num"><input type="number" class="cell-input-point" id="point1-${{idx}}" value="${{r["1課発注点"]}}" oninput="tableData[${{idx}}]['1課発注点']=Number(this.value); recalculateRow(${{idx}})" onkeydown="handleKeyDown(event, 'point1', ${{idx}})"></td>
                     <td class="w-num"><input type="number" class="cell-input-point" id="point2-${{idx}}" value="${{r["2課発注点"]}}" oninput="tableData[${{idx}}]['2課発注点']=Number(this.value); recalculateRow(${{idx}})" onkeydown="handleKeyDown(event, 'point2', ${{idx}})"></td>
                     <td class="w-num bg-cyan">${{fmtNum(r["在庫数_ロジザード"])}}</td>
                     <td class="w-num bg-cyan">${{fmtNum(r["入荷予定数_ロジザード"])}}</td>
                     <td class="w-date bg-cyan"><input type="text" class="cell-input" id="ndate-${{idx}}" value="${{r["入荷予定日_ロジザード"] || ""}}" placeholder="日付入力" oninput="updateCell(${{idx}}, '入荷予定日_ロジザード', this.value)" onkeydown="handleKeyDown(event, 'ndate', ${{idx}})"></td>
                     <td class="w-num bg-cyan">${{fmtNum(r["確保数_ロジザード"])}}</td>
-                    <td class="w-num bg-cyan"><span class="click-link" onclick="openModal(${{idx}}, 'yayoi')">${{fmtNum(r["在庫確保_弥生"])}}</span></td>
-                    <td class="w-num bg-cyan"><span class="click-link" style="color:#b91c1c;" onclick="openModal(${{idx}}, 'marufuji')">${{fmtNum(r["在庫確保_丸藤"])}}</span></td>
-                    <td class="w-num ${{zureCls}}" id="zure-${{idx}}">${{fmtNum(r["確保数のズレ"])}}</td>
+                    <td class="w-num bg-cyan"><span class="click-link" onclick="openModal(${{idx}}, 'yayoi', '')">${{fmtNum(r["在庫確保_弥生"])}}</span></td>
+                    <td class="w-num bg-cyan"><span class="click-link" style="color:#b91c1c;" onclick="openModal(${{idx}}, 'marufuji', '')">${{fmtNum(r["在庫確保_丸藤"])}}</span></td>
+                    <td class="w-num ${{zureCls}}" id="zure-${{idx}}"><span class="${{zureLinkCls}}" onclick="openModal(${{idx}}, 'zure', '')">${{fmtNum(r["確保数のズレ"])}}</span></td>
                     <td class="w-num bg-cyan">${{fmtNum(r["入荷後のフリー在庫"])}}</td>
                     <td class="w-num ${{flagCls}}" id="flag-${{idx}}">${{fmtNum(r["発注検討フラグ"])}}</td>
                     <td class="w-num ${{rateCls}}">${{fmtNum(r["在庫回転率"]) + "%"}}</td>
@@ -1338,63 +1537,231 @@ with tab1:
             saveToStorage(tableData[idx]["品番"], tableData[idx]);
         }}
 
-        function switchModalMode(mode) {{
+        function switchModalMode(mode, kiStr) {{
             if (currentModalIdx === null) return;
-            openModal(currentModalIdx, mode);
+            openModal(currentModalIdx, mode, kiStr || "ALL");
         }}
 
-        function openModal(idx, mode) {{
+        function openModal(idx, mode, kiStr) {{
             currentModalIdx = idx;
             currentModalMode = mode;
+            currentKiFilter = kiStr || "ALL";
             const r = tableData[idx];
             const code = r["品番"];
             const codeNorm = r["品番_正規化"] || code;
 
+            document.getElementById("btn-mode-sales").className = (mode === 'sales') ? "mode-btn active" : "mode-btn";
+            document.getElementById("btn-mode-zure").className = (mode === 'zure') ? "mode-btn active" : "mode-btn";
             document.getElementById("btn-mode-yayoi").className = (mode === 'yayoi') ? "mode-btn active" : "mode-btn";
             document.getElementById("btn-mode-maru").className = (mode === 'marufuji') ? "mode-btn active" : "mode-btn";
 
-            document.getElementById("modal-title-text").innerHTML = `📦 品番: 【${{code}}】 ${{r["商品区分"]}}`;
+            document.getElementById("modal-title-text").innerHTML = `📦 品番: 【${{code}}】 ${{r["商品区分"]}} （拠点: ${{r["商品センター"]}}）`;
             document.getElementById("modal-summary").innerHTML = `
                 <div class="summary-item">74〜77期出荷: <span>${{fmtNum(r["74期"])}} / ${{fmtNum(r["75期"])}} / ${{fmtNum(r["76期"])}} / ${{fmtNum(r["77期"])}}</span></div>
                 <div class="summary-item">1課/2課発注点: <span>${{fmtNum(r["1課発注点"])}} / ${{fmtNum(r["2課発注点"])}}</span></div>
                 <div class="summary-item">ロジ在庫: <span>${{fmtNum(r["在庫数_ロジザード"])}}</span></div>
+                <div class="summary-item">ロジ確保: <span>${{fmtNum(r["確保数_ロジザード"])}}</span></div>
                 <div class="summary-item">弥生確保(一般): <span>${{fmtNum(r["在庫確保_弥生"])}}</span></div>
                 <div class="summary-item">丸藤確保: <span style="color:#b91c1c;">${{fmtNum(r["在庫確保_丸藤"])}}</span></div>
-                <div class="summary-item">入荷後のフリー在庫: <span>${{fmtNum(r["入荷後のフリー在庫"])}}</span></div>
-                <div class="summary-item">発注検討フラグ: <span style="color:#e11d48;">${{fmtNum(r["発注検討フラグ"])}}</span></div>
+                <div class="summary-item">確保のズレ: <span style="color:#be123c;">${{fmtNum(r["確保数のズレ"])}}</span></div>
+                <div class="summary-item">フリー在庫: <span>${{fmtNum(r["入荷後のフリー在庫"])}}</span></div>
             `;
             document.getElementById("modal-view-prev").value = r["前回決定事項"] || "";
             document.getElementById("modal-input-ndate").value = r["入荷予定日_ロジザード"] || "";
             document.getElementById("modal-input-dec").value = r["決定事項"] || "";
             document.getElementById("modal-input-odate").value = r["発注日"] || "";
 
-            let targetList = [];
-            if (mode === 'marufuji') {{
-                document.getElementById("modal-sub-title").innerHTML = "🏢 【丸藤専用】確保リスト（2027年以降を含む全受注を表示）";
-                targetList = marufujiMap[codeNorm] || [];
-            }} else {{
-                document.getElementById("modal-sub-title").innerHTML = "🏢 得意先別・弥生確保リスト（2027年以降を含む全受注を表示）";
-                targetList = yayoiMap[codeNorm] || [];
-            }}
+            // ① 実績（購入先ランキング）モード
+            if (mode === 'sales') {{
+                const kiTitle = (currentKiFilter && currentKiFilter !== 'ALL') ? `${{currentKiFilter}}` : "全期間累計";
+                let kiBtnsHtml = `
+                    <div style="display:flex; gap:8px; margin-bottom:12px; align-items:center;">
+                        <span style="font-size:13px; font-weight:bold; color:#334155;">期間切替:</span>
+                        <button class="stamp-btn" style="${{currentKiFilter==='ALL'?'background:#1e40af;color:#fff;':''}}" onclick="openModal(${{idx}}, 'sales', 'ALL')">全期間</button>
+                        <button class="stamp-btn" style="${{currentKiFilter==='74期'?'background:#1e40af;color:#fff;':''}}" onclick="openModal(${{idx}}, 'sales', '74期')">74期 (${{fmtNum(r['74期'])}}個)</button>
+                        <button class="stamp-btn" style="${{currentKiFilter==='75期'?'background:#1e40af;color:#fff;':''}}" onclick="openModal(${{idx}}, 'sales', '75期')">75期 (${{fmtNum(r['75期'])}}個)</button>
+                        <button class="stamp-btn" style="${{currentKiFilter==='76期'?'background:#1e40af;color:#fff;':''}}" onclick="openModal(${{idx}}, 'sales', '76期')">76期 (${{fmtNum(r['76期'])}}個)</button>
+                        <button class="stamp-btn" style="${{currentKiFilter==='77期'?'background:#1e40af;color:#fff;':''}}" onclick="openModal(${{idx}}, 'sales', '77期')">77期 (${{fmtNum(r['77期'])}}個)</button>
+                    </div>
+                `;
+                document.getElementById("modal-sub-title").innerHTML = `🔥 【${{code}}】どこで購入されているか（得意先別 実績内訳：${{kiTitle}}）`;
 
-            if (targetList.length === 0) {{
-                document.getElementById("modal-yayoi-area").innerHTML = `<div style="padding:16px; font-size:14.5px; color:#64748b; background:#f8fafc;">該当する受注確保データはありません。</div>`;
-            }} else {{
-                let yHtml = `<table class="sub-table"><thead><tr><th>受注番号</th><th>得意先名</th><th>数量</th><th>受注日</th><th>納入期日</th><th>倉庫名</th><th>担当者</th><th>備考</th></tr></thead><tbody>`;
-                targetList.forEach(y => {{
-                    yHtml += `<tr>
-                        <td style="text-align:center; font-weight:bold;">${{y["受注番号"] || ""}}</td>
-                        <td style="font-weight:bold;">${{y["得意先名"]}}</td>
-                        <td style="text-align:right; font-weight:bold; color:#0284c7; font-size:15.5px;">${{fmtNum(y["数量"])}}</td>
-                        <td style="text-align:center; font-weight:bold;">${{y["受注日"]}}</td>
-                        <td style="text-align:center;">${{y["納入期日"]}}</td>
-                        <td style="text-align:center; font-weight:bold;">${{y["倉庫名"] || ""}}</td>
-                        <td style="text-align:center;">${{y["担当者名"] || ""}}</td>
-                        <td>${{y["備考"]}}</td>
+                const codeSalesObj = salesCompMap[codeNorm] || {{}};
+                const compList = codeSalesObj[currentKiFilter] || codeSalesObj["ALL"] || [];
+                const detList = salesDetMap[codeNorm] || [];
+                const yayoiRankList = yayoiRankMap[codeNorm] || [];
+
+                let sHtml = kiBtnsHtml;
+                if (compList.length > 0) {{
+                    sHtml += `<table class="sub-table"><thead><tr><th style="width:55px;">順位</th><th>購入先（得意先名）</th><th style="width:115px;">購入数量</th><th style="width:85px;">構成比</th><th style="width:125px;">売上金額</th><th style="width:85px;">伝票回数</th><th style="width:115px;">最終売上日</th></tr></thead><tbody>`;
+                    compList.forEach((c, cIdx) => {{
+                        sHtml += `<tr>
+                            <td style="text-align:center; font-weight:bold;">${{cIdx + 1}}</td>
+                            <td style="font-weight:bold; color:#1e293b;">${{c["得意先名"]}}</td>
+                            <td style="text-align:right; font-weight:bold; color:#ea580c; background:#fff7ed; font-size:15.5px;">${{fmtNum(c["数量"])}} 個</td>
+                            <td style="text-align:right; font-weight:bold;">${{c["構成比"]}}</td>
+                            <td style="text-align:right;">¥${{fmtNum(c["金額"])}}</td>
+                            <td style="text-align:center;">${{fmtNum(c["伝票回数"])}} 回</td>
+                            <td style="text-align:center;">${{c["最終売上日"]}}</td>
+                        </tr>`;
+                    }});
+                    sHtml += `</tbody></table>`;
+
+                    if (detList.length > 0) {{
+                        sHtml += `<div class="sec-title" style="margin-top:18px;">📄 売上伝票明細（最新50件）</div>`;
+                        sHtml += `<table class="sub-table"><thead><tr><th style="width:75px;">期</th><th style="width:110px;">売上日</th><th>得意先名</th><th style="width:95px;">数量</th><th style="width:115px;">金額</th><th style="width:90px;">担当者</th></tr></thead><tbody>`;
+                        detList.forEach(d => {{
+                            sHtml += `<tr>
+                                <td style="text-align:center;">${{d["期"]}}</td>
+                                <td style="text-align:center; font-weight:bold;">${{d["日付"]}}</td>
+                                <td style="font-weight:bold;">${{d["得意先名"]}}</td>
+                                <td style="text-align:right; font-weight:bold; color:#0284c7;">${{fmtNum(d["数量"])}}</td>
+                                <td style="text-align:right;">¥${{fmtNum(d["金額"])}}</td>
+                                <td style="text-align:center;">${{d["担当者"]}}</td>
+                            </tr>`;
+                        }});
+                        sHtml += `</tbody></table>`;
+                    }}
+                }} else {{
+                    sHtml += `<div class="diag-box" style="background:#f8fafc; border:1px solid #cbd5e1; color:#334155;">
+                        <b>📊 期別 出荷実績サマリー</b>： 74期: <b>${{fmtNum(r["74期"])}}</b> 個 ／ 75期: <b>${{fmtNum(r["75期"])}}</b> 個 ／ 76期: <b>${{fmtNum(r["76期"])}}</b> 個 ／ 77期(今期): <b style="color:#ea580c;">${{fmtNum(r["77期"])}}</b> 個<br>
+                        <span style="font-size:12.5px; color:#64748b;">※過去の全売上明細ファイル（CSV/Excel）をGoogleドライブに入れるか、画面右上の「📂手動アップロード」の『🔥売上明細データ』にアップすると、過去すべての購入先ランキングが表示されます。</span>
+                    </div>`;
+
+                    if (yayoiRankList.length > 0) {{
+                        sHtml += `<div class="sec-title">🏢 現在の『在庫確保.xlsx』における大口注文・確保先ランキング</div>`;
+                        sHtml += `<table class="sub-table"><thead><tr><th style="width:55px;">順位</th><th>得意先名（確保依頼元）</th><th style="width:120px;">確保数量 合計</th><th style="width:90px;">構成比</th><th style="width:95px;">伝票数</th><th style="width:120px;">最終受注日</th></tr></thead><tbody>`;
+                        yayoiRankList.forEach((yr, yIdx) => {{
+                            sHtml += `<tr>
+                                <td style="text-align:center; font-weight:bold;">${{yIdx + 1}}</td>
+                                <td style="font-weight:bold; color:#1e293b;">${{yr["得意先名"]}}</td>
+                                <td style="text-align:right; font-weight:bold; color:#0284c7; background:#f0f9ff; font-size:15.5px;">${{fmtNum(yr["数量"])}} 個</td>
+                                <td style="text-align:right; font-weight:bold;">${{yr["構成比"]}}</td>
+                                <td style="text-align:center;">${{fmtNum(yr["伝票回数"])}} 件</td>
+                                <td style="text-align:center;">${{yr["最終受注日"]}}</td>
+                            </tr>`;
+                        }});
+                        sHtml += `</tbody></table>`;
+                    }} else {{
+                        sHtml += `<div style="padding:14px; color:#64748b;">現在この商品の弥生確保データはありません。</div>`;
+                    }}
+                }}
+                document.getElementById("modal-yayoi-area").innerHTML = sHtml;
+            }}
+            // ② 確保数のズレ診断 ＆ 全ズレ商品一覧モード
+            else if (mode === 'zure') {{
+                document.getElementById("modal-sub-title").innerHTML = `⚖️ 【${{code}}】確保数のズレ原因診断 ＆ 全ズレ商品リスト`;
+                const rojiSec = Number(r["確保数_ロジザード"] || 0);
+                const yayoiSec = Number(r["在庫確保_弥生"] || 0);
+                const maruSec = Number(r["在庫確保_丸藤"] || 0);
+                const totalYayoi = yayoiSec + maruSec;
+                const zure = Number(r["確保数のズレ"] || 0);
+
+                let diagHtml = "";
+                if (zure === 0) {{
+                    diagHtml = `<div class="diag-box" style="background:#f0fdf4; border:2px solid #86efac; color:#166534;">
+                        <b>✅ この商品（${{code}}）の確保数は完全に一致しています（ズレ: 0個）</b><br>
+                        ロジザード確保数（<b>${{fmtNum(rojiSec)}}</b> 個） ＝ 弥生確保（一般 <b>${{fmtNum(yayoiSec)}}</b> 個 ＋ 丸藤 <b>${{fmtNum(maruSec)}}</b> 個）
+                    </div>`;
+                }} else if (zure < 0) {{
+                    diagHtml = `<div class="diag-box" style="background:#fff1f2; border:2px solid #fda4af; color:#9f1239;">
+                        <b>🚨 弥生確保の方が 【${{fmtNum(Math.abs(zure))}} 個】 多い状態です（ズレ: ${{fmtNum(zure)}}）</b><br>
+                        ・ロジザード側の確保数: <b>${{fmtNum(rojiSec)}}</b> 個<br>
+                        ・弥生販売側の確保合計: <b>${{fmtNum(totalYayoi)}}</b> 個 （一般: <b>${{fmtNum(yayoiSec)}}</b> 個 ／ 丸藤: <b>${{fmtNum(maruSec)}}</b> 個）<br>
+                        👉 <b>主な原因</b>：弥生販売で受注伝票（確保）を登録したあと、<b>ロジザード側で確保在庫への移動（引当）がまだ行われていない</b>か、2027年等の先行受注分をロジザード側でまだ確保枠に移していない可能性があります。下の弥生伝票明細を確認してください。
+                    </div>`;
+                }} else {{
+                    diagHtml = `<div class="diag-box" style="background:#fffbeb; border:2px solid #fcd34d; color:#92400e;">
+                        <b>⚠️ ロジザード確保の方が 【＋${{fmtNum(zure)}} 個】 多い状態です（ズレ: +${{fmtNum(zure)}}）</b><br>
+                        ・ロジザード側の確保数: <b>${{fmtNum(rojiSec)}}</b> 個<br>
+                        ・弥生販売側の確保合計: <b>${{fmtNum(totalYayoi)}}</b> 個 （一般: <b>${{fmtNum(yayoiSec)}}</b> 個 ／ 丸藤: <b>${{fmtNum(maruSec)}}</b> 個）<br>
+                        👉 <b>主な原因</b>：弥生販売側ではすでに出荷売上済（またはキャンセル消込済）なのに、<b>ロジザード側の確保枠から外し忘れている</b>か、リンベル確保分（<b>${{fmtNum(r["リンベル確保数"] || 0)}}</b> 個）などがロジザード側に入っている可能性があります。
+                    </div>`;
+                }}
+
+                // この商品の弥生確保明細
+                const thisYayoiList = yayoiMap[codeNorm] || [];
+                if (thisYayoiList.length > 0) {{
+                    diagHtml += `<div class="sec-title">📋 この商品（${{code}}）の弥生確保 登録明細（全 ${{thisYayoiList.length}} 件）</div>`;
+                    diagHtml += `<table class="sub-table" style="margin-bottom:18px;"><thead><tr><th>受注番号</th><th>得意先名</th><th>数量</th><th>受注日</th><th>納入期日</th><th>倉庫名</th><th>備考</th></tr></thead><tbody>`;
+                    thisYayoiList.forEach(y => {{
+                        diagHtml += `<tr>
+                            <td style="text-align:center; font-weight:bold;">${{y["受注番号"] || ""}}</td>
+                            <td style="font-weight:bold;">${{y["得意先名"]}}</td>
+                            <td style="text-align:right; font-weight:bold; color:#be123c; background:#fff1f2;">${{fmtNum(y["数量"])}}</td>
+                            <td style="text-align:center;">${{y["受注日"]}}</td>
+                            <td style="text-align:center;">${{y["納入期日"]}}</td>
+                            <td style="text-align:center;">${{y["倉庫名"] || ""}}</td>
+                            <td>${{y["備考"]}}</td>
+                        </tr>`;
+                    }});
+                    diagHtml += `</tbody></table>`;
+                }}
+
+                // 全商品のうちズレが発生している商品一覧
+                const allZureRows = tableData.filter(item => Number(item["確保数のズレ"] || 0) !== 0)
+                    .sort((a, b) => Math.abs(Number(b["確保数のズレ"])) - Math.abs(Number(a["確保数のズレ"])));
+
+                diagHtml += `<div class="sec-title">⚖️ 現在「確保数のズレ」が発生している全商品一覧（全 ${{allZureRows.length}} 件 ／ 品番クリックで切替）</div>`;
+                diagHtml += `<table class="sub-table"><thead><tr>
+                    <th style="width:65px;">拠点</th>
+                    <th style="width:130px;">品番</th>
+                    <th>商品名</th>
+                    <th style="width:105px;">ロジ確保(T)</th>
+                    <th style="width:105px;">弥生一般(U)</th>
+                    <th style="width:105px;">丸藤確保(V)</th>
+                    <th style="width:110px;">確保のズレ</th>
+                    <th>ズレの主な要因</th>
+                </tr></thead><tbody>`;
+
+                allZureRows.forEach(zr => {{
+                    const zVal = Number(zr["確保数のズレ"]);
+                    const isCurr = (zr["_origIdx"] === idx) ? "background:#fef9c3;" : "";
+                    const reasonTxt = (zVal < 0) ? "🚨 弥生確保が多い（ロジ未引当/先行受注）" : "⚠️ ロジ確保が多い（ロジ解除漏れ/リンベル等）";
+                    diagHtml += `<tr style="${{isCurr}}">
+                        <td style="text-align:center;">${{zr["商品センター"]}}</td>
+                        <td><span class="click-link" onclick="openModal(${{zr['_origIdx']}}, 'zure', '')">${{zr["品番"]}}</span></td>
+                        <td style="font-weight:bold;">${{zr["商品区分"]}}</td>
+                        <td style="text-align:right;">${{fmtNum(zr["確保数_ロジザード"])}}</td>
+                        <td style="text-align:right;">${{fmtNum(zr["在庫確保_弥生"])}}</td>
+                        <td style="text-align:right; color:#b91c1c; font-weight:bold;">${{fmtNum(zr["在庫確保_丸藤"])}}</td>
+                        <td style="text-align:right; font-weight:bold; color:#be123c; background:#ffe4e6; font-size:15px;">${{fmtNum(zVal)}}</td>
+                        <td style="font-size:13px; font-weight:bold;">${{reasonTxt}}</td>
                     </tr>`;
                 }});
-                yHtml += `</tbody></table>`;
-                document.getElementById("modal-yayoi-area").innerHTML = yHtml;
+                diagHtml += `</tbody></table>`;
+                document.getElementById("modal-yayoi-area").innerHTML = diagHtml;
+            }}
+            // ③ 弥生確保 / 丸藤確保リストモード
+            else {{
+                let targetList = [];
+                if (mode === 'marufuji') {{
+                    document.getElementById("modal-sub-title").innerHTML = "🏢 【丸藤専用】確保リスト（2027年以降を含む全受注を表示）";
+                    targetList = marufujiMap[codeNorm] || [];
+                }} else {{
+                    document.getElementById("modal-sub-title").innerHTML = "🏢 得意先別・弥生確保リスト（2027年以降を含む全受注を表示）";
+                    targetList = yayoiMap[codeNorm] || [];
+                }}
+
+                if (targetList.length === 0) {{
+                    document.getElementById("modal-yayoi-area").innerHTML = `<div style="padding:16px; font-size:14.5px; color:#64748b; background:#f8fafc;">該当する受注確保データはありません。</div>`;
+                }} else {{
+                    let yHtml = `<table class="sub-table"><thead><tr><th>受注番号</th><th>得意先名</th><th>数量</th><th>受注日</th><th>納入期日</th><th>倉庫名</th><th>担当者</th><th>備考</th></tr></thead><tbody>`;
+                    targetList.forEach(y => {{
+                        yHtml += `<tr>
+                            <td style="text-align:center; font-weight:bold;">${{y["受注番号"] || ""}}</td>
+                            <td style="font-weight:bold;">${{y["得意先名"]}}</td>
+                            <td style="text-align:right; font-weight:bold; color:#0284c7; font-size:15.5px;">${{fmtNum(y["数量"])}}</td>
+                            <td style="text-align:center; font-weight:bold;">${{y["受注日"]}}</td>
+                            <td style="text-align:center;">${{y["納入期日"]}}</td>
+                            <td style="text-align:center; font-weight:bold;">${{y["倉庫名"] || ""}}</td>
+                            <td style="text-align:center;">${{y["担当者名"] || ""}}</td>
+                            <td>${{y["備考"]}}</td>
+                        </tr>`;
+                    }});
+                    yHtml += `</tbody></table>`;
+                    document.getElementById("modal-yayoi-area").innerHTML = yHtml;
+                }}
             }}
 
             const hList = histMap[code] || [];
