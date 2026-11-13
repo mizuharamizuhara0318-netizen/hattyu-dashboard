@@ -626,7 +626,13 @@ def parse_yayoi_sales_csv(fname: str, raw_bytes: bytes, mtime_str: str = "") -> 
     out["cust"] = df[c_cust].apply(lambda x: clean_str(x) if clean_str(x) else "（得意先名なし）") if c_cust is not None else "（得意先名なし）"
     out["qty"] = df[c_qty].apply(to_num)
     out["price"] = df[c_price].apply(to_num) if c_price is not None else 0.0
-    out["amount"] = df[c_amt].apply(to_num) if c_amt is not None else (out["qty"] * out["price"])
+    raw_amt = df[c_amt].apply(to_num) if c_amt is not None else pd.Series([0.0] * len(df))
+    calc_amt = out["qty"] * out["price"]
+    # 金額列が0または「単価と同じ数字（数量が掛けられていない）」場合は、数量×単価を優先採用
+    out["amount"] = [
+        ca if (ra <= 0 or (q > 1 and abs(ra - p) < 1 and ca > ra)) else ra
+        for ra, ca, q, p in zip(raw_amt, calc_amt, out["qty"], out["price"])
+    ]
     out["staff"] = df[c_stf].apply(clean_str) if c_stf is not None else ""
 
     if c_dt is not None:
@@ -1412,32 +1418,32 @@ df_main["今期出荷"] = df_main["品番_正規化"].map(konki_qty_map).fillna(
 df_main["先週売数"] = df_main["品番_正規化"].map(prev_w_qty_map).fillna(0).astype(int)
 df_main["今週売数"] = df_main["品番_正規化"].map(this_w_qty_map).fillna(0).astype(int)
 
-# 4. 『order_r（マスター）.xlsx』の「新原価」「item」と『yayoi_CSV』だけで売上高・粗利額・粗利率を算出
+# 4. 『今期（26/7〜）の売上だけ』で今期売上高・今期粗利額・今期粗利率を算出（過去期は一切混ぜない）
 new_costs, min_gedais, avg_prices, sales_amts, gross_profits, margin_rates, stock_vals = [], [], [], [], [], [], []
 is_new_list, is_surge_list, is_dead_list = [], [], []
 
 for _, r in df_main.iterrows():
     cn = r["品番_正規化"]
-    # ① 原価・下代は 100%『order_r（マスター）.xlsx』の「新原価」「item」シートからのみ取得！
+    # ① 原価・下代は『order_r（マスター）.xlsx』の「新原価」「item」シートから取得
     u_cost = float(cost_map.get(cn, 0.0))
     raw_gedai = float(gedai_map.get(cn, 0.0))
     raw_std_p = float(std_price_map.get(cn, 0.0))
 
-    # 標準下代（最低下代または販売価格のうち、99999などのダミー値を除いた有効値）
-    if 0 < raw_gedai < 90000:
-        u_gedai = raw_gedai
-    elif 0 < raw_std_p < 90000:
+    # 標準販売単価（itemシートの販売価格 または 新原価シートの最低下代）
+    if 0 < raw_std_p < 90000:
         u_gedai = raw_std_p
+    elif 0 < raw_gedai < 90000:
+        u_gedai = raw_gedai
     else:
         u_gedai = round(u_cost / 0.65, 0) if u_cost > 0 else 0.0
 
-    # ② 今期売上（yayoi_CSV）の個数と金額
+    # ② 今期（26/7〜）の売上数量と売上金額のみを使用！
     konki_q = int(r["今期出荷"])
     k77_q = int(r["77期"])
     csv_amt = float(konki_amt_map.get(cn, 0.0))
     csv_unit_p = (csv_amt / konki_q) if (konki_q > 0 and csv_amt > 0) else 0.0
 
-    # 単価の決定：yayoi_CSVの実売単価が原価より上なら実売単価、そうでなければorder_rの下代を採用
+    # 今期の実売平均単価（CSVの金額が原価以上なら実売単価、もしCSVに単価が入っていない・原価割れならorder_rの下代で補完）
     if csv_unit_p > u_cost and u_cost > 0:
         u_avg_p = csv_unit_p
     elif u_gedai > u_cost and u_cost > 0:
@@ -1445,31 +1451,29 @@ for _, r in df_main.iterrows():
     elif u_cost > 0:
         u_avg_p = round(u_cost / 0.65, 0)
     else:
-        u_avg_p = csv_unit_p or u_gedai or 0.0
+        u_avg_p = csv_unit_p if csv_unit_p > 0 else u_gedai
 
-    # ③ 今期出荷（yayoi_CSV）をベースに売上高・粗利額を計算（今期0個の場合は77期個数×order_r下代で参考算出）
-    active_q = konki_q if konki_q > 0 else k77_q
-    if active_q > 0 and u_avg_p > 0:
-        s_amt = int(round(active_q * u_avg_p))
-        g_profit = int(round(s_amt - (active_q * u_cost))) if u_cost > 0 else 0
-        if g_profit < 0:
-            # 万が一、下代設定自体が原価より低い特売品でもマイナス表示にならないよう実態に合わせる
-            g_profit = 0
+    # ③ 今期の売上高・今期の粗利額・今期の粗利率を算出（今期売れていない商品はすべて 0 にする）
+    if konki_q > 0 and u_avg_p > 0:
+        # CSVの実売合計金額が原価合計を超えていればそのまま使用、不足していれば個数×単価で算出
+        s_amt = int(round(csv_amt)) if (csv_amt >= konki_q * u_cost and csv_amt > 0) else int(round(konki_q * u_avg_p))
+        cost_total = int(round(konki_q * u_cost)) if u_cost > 0 else int(round(s_amt * 0.65))
+        g_profit = max(0, s_amt - cost_total)
         m_rate = round((g_profit / s_amt) * 100, 1) if s_amt > 0 else 0.0
     else:
         s_amt = 0
         g_profit = 0
-        m_rate = round(((u_avg_p - u_cost) / u_avg_p) * 100, 1) if (u_avg_p > u_cost and u_cost > 0) else 0.0
+        m_rate = 0.0
 
     st_val = int(round(max(int(r["在庫数_ロジザード"]), 0) * u_cost))
 
     # 🆕 新商品 ／ ⚡ 急増 ／ ❄️ 滞留 の判定
     is_new = (int(r["74期"]) == 0 and int(r["75期"]) == 0 and (int(r["76期"]) > 0 or k77_q > 0 or konki_q > 0))
-    avg_weekly = max(k77_q / 52.0, 10.0)
+    avg_weekly = max((konki_q / 20.0) if konki_q > 0 else (k77_q / 52.0), 10.0)
     w_this = int(r["今週売数"])
     w_prev = int(r["先週売数"])
     is_surge = (w_this >= 30 and w_this >= max(w_prev * 1.5, avg_weekly * 1.8))
-    is_dead = ((int(r["入荷後のフリー在庫"]) >= 1000 or st_val >= 300000) and int(r["在庫回転率"]) <= 15 and w_this == 0)
+    is_dead = ((int(r["入荷後のフリー在庫"]) >= 1000 or st_val >= 300000) and int(r["在庫回転率"]) <= 15 and konki_q == 0)
 
     new_costs.append(int(round(u_cost)))
     min_gedais.append(int(round(u_gedai)))
@@ -2017,9 +2021,9 @@ with tab1:
                     <td class="w-num bg-hist-ki"><span class="click-link-ki" onclick="openModal(${{idx}}, 'sales', 'PREV_WEEK')">${{fmtNum(prevWVal)}}</span></td>
                     <td class="w-num ${{thisWCls}}"><span class="click-link-konki" onclick="openModal(${{idx}}, 'sales', 'THIS_WEEK')">${{thisWVal > 0 ? "⚡ " + fmtNum(thisWVal) : "0"}}</span></td>
                     <td class="w-num" style="background:#f0fdf4; font-weight:bold;">¥${{fmtNum(r["新原価"])}}</td>
-                    <td class="w-money" style="background:#f0fdf4;">¥${{fmtNum(r["売上高"])}}</td>
-                    <td class="w-money bg-profit"><span class="click-link-profit" onclick="openModal(${{idx}}, 'sales', 'ALL')">¥${{fmtNum(r["粗利額"])}}</span></td>
-                    <td class="w-num" style="background:#f0fdf4; font-weight:bold;">${{r["粗利率"]}}%</td>
+                    <td class="w-money" style="background:#f0fdf4;"><span class="click-link-profit" onclick="openModal(${{idx}}, 'sales', '今期(26/7〜)')">¥${{fmtNum(r["売上高"])}}</span></td>
+                    <td class="w-money bg-profit"><span class="click-link-profit" onclick="openModal(${{idx}}, 'sales', '今期(26/7〜)')">¥${{fmtNum(r["粗利額"])}}</span></td>
+                    <td class="w-num" style="background:#f0fdf4; font-weight:bold;"><span class="click-link-profit" onclick="openModal(${{idx}}, 'sales', '今期(26/7〜)')">${{r["粗利率"]}}%</span></td>
                     <td class="w-num"><input type="number" class="cell-input-point" id="point1-${{idx}}" value="${{r["1課発注点"]}}" oninput="tableData[${{idx}}]['1課発注点']=Number(this.value); recalculateRow(${{idx}})" onkeydown="handleKeyDown(event, 'point1', ${{idx}})"></td>
                     <td class="w-num"><input type="number" class="cell-input-point" id="point2-${{idx}}" value="${{r["2課発注点"]}}" oninput="tableData[${{idx}}]['2課発注点']=Number(this.value); recalculateRow(${{idx}})" onkeydown="handleKeyDown(event, 'point2', ${{idx}})"></td>
                     <td class="w-num bg-cyan">${{fmtNum(r["在庫数_ロジザード"])}}</td>
