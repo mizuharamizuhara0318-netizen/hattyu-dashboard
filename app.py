@@ -402,8 +402,8 @@ def sync_all_files_from_gdrive(order_url: str, kakuho_url: str = "", master_r_ur
 @st.cache_data
 def load_order_r_cost_master(file_source):
     """
-    order_r（マスター）.xlsx の『新原価』シートから最新の原価・最低下代・倉庫区分を取得し、
-    『item』シートから標準販売価格・商品名を取得する関数
+    order_r（マスター）.xlsx の『新原価』シートから最新の原価・最低下代を取得し、
+    『加盟店価格』『加盟店グループ管理』『注文者会社名』から会社ごとの販売価格（ロット単価）を取得する関数
     """
     raw_bytes = None
     used_label = ""
@@ -432,14 +432,15 @@ def load_order_r_cost_master(file_source):
     wh_type_map = {}
     std_price_map = {}
     r_name_map = {}
+    kamei_price_map = {}
 
     if raw_bytes is None:
-        return cost_map, gedai_map, wh_type_map, std_price_map, r_name_map, "未検出(発注検討表内の原価を使用)"
+        return cost_map, gedai_map, wh_type_map, std_price_map, r_name_map, kamei_price_map, "未検出"
 
     clean_io = fix_corrupted_xlsx_filters(raw_bytes)
     try:
         xls = pd.ExcelFile(clean_io)
-        # 1. 『新原価』シートの読み取り（最優先）
+        # 1. 『新原価』シートの読み取り（原価・最低下代の最優先マスター）
         if "新原価" in xls.sheet_names:
             df_sg = pd.read_excel(xls, sheet_name="新原価")
             for _, r in df_sg.iterrows():
@@ -456,7 +457,7 @@ def load_order_r_cost_master(file_source):
                         if 0 < g_val < 90000:
                             gedai_map[c_n] = g_val
 
-        # 2. 『item』シートの読み取り（販売価格・商品名・原価の補完）
+        # 2. 『item』シートの読み取り
         if "item" in xls.sheet_names:
             df_it = pd.read_excel(xls, sheet_name="item")
             for _, r in df_it.iterrows():
@@ -472,14 +473,73 @@ def load_order_r_cost_master(file_source):
                     cost_map[c_n] = c_val
                 nm = clean_str(r.get("商品名", ""))
                 if nm:
-                    # 「青山1/（i30）【ABO-03】防災ポリバケツ３L（4962644...）」から商品名部分を抽出
                     nm_clean = re.sub(r'^.*?】', '', nm)
                     nm_clean = re.sub(r'[\(（]\d{13}[\)）]$', '', nm_clean).strip()
                     r_name_map[c_n] = nm_clean or nm
+
+        # 3. グループ番号・加盟店コードから会社名を引く辞書を作成
+        grp_to_comp = {"12": "【標準ランク】1.1倍", "13": "【標準ランク】1.15倍", "14": "【標準ランク】1.2倍", "15": "【標準ランク】1.25倍", "40": "【標準ランク】定価/上代"}
+        if "加盟店グループ管理" in xls.sheet_names:
+            df_gm = pd.read_excel(xls, sheet_name="加盟店グループ管理")
+            for _, r in df_gm.iterrows():
+                cnm = clean_str(r.get("加盟店名", ""))
+                if cnm:
+                    g_no = clean_str(r.get("グループ番号", "")).replace("_x000D_", "").strip()
+                    k_cd = clean_str(r.get("加盟店コード", "")).strip()
+                    if g_no:
+                        grp_to_comp[g_no] = cnm
+                    if k_cd:
+                        grp_to_comp[k_cd] = cnm
+
+        if "注文者会社名" in xls.sheet_names:
+            df_cm = pd.read_excel(xls, sheet_name="注文者会社名")
+            for _, r in df_cm.iterrows():
+                cnm = clean_str(r.get("加盟店名", ""))
+                if cnm:
+                    g_no = clean_str(r.get("グループ番号", "")).strip()
+                    k_cd = clean_str(r.get("加盟店コード", "")).strip()
+                    if g_no and g_no not in grp_to_comp:
+                        grp_to_comp[g_no] = cnm
+                    if k_cd and k_cd not in grp_to_comp:
+                        grp_to_comp[k_cd] = cnm
+
+        # 4. 『加盟店価格』シートから商品別・会社別の販売価格（ロット単価）を一括取得
+        if "加盟店価格" in xls.sheet_names:
+            df_kp = pd.read_excel(xls, sheet_name="加盟店価格")
+            for _, r in df_kp.iterrows():
+                p_raw = clean_str(r.get("商品番号", "")) or clean_str(r.get("商品管理番号", ""))
+                if not p_raw:
+                    continue
+                c_n = normalize_code(p_raw)
+                u_price = int(round(to_num(r.get("ロット単価", 0))))
+                if u_price <= 0 or u_price >= 90000:
+                    continue
+                lot_q = max(int(round(to_num(r.get("ロット数", 1)))), 1)
+                comp_nm = clean_str(r.get("会社名", ""))
+                g_seq = clean_str(r.get("グループ連番", ""))
+                if not comp_nm and g_seq:
+                    comp_nm = grp_to_comp.get(g_seq, f"グループ連番:{g_seq}")
+                if not comp_nm:
+                    continue
+
+                # 最低下代が新原価シートになければ加盟店価格シートの最低下代で補完
+                if c_n not in gedai_map:
+                    g_val = to_num(r.get("最低下代", 0))
+                    if 0 < g_val < 90000:
+                        gedai_map[c_n] = g_val
+
+                if c_n not in kamei_price_map:
+                    kamei_price_map[c_n] = []
+                kamei_price_map[c_n].append({
+                    "会社名": comp_nm,
+                    "グループ": g_seq,
+                    "ロット数": lot_q,
+                    "販売価格": u_price
+                })
     except Exception:
         pass
 
-    return cost_map, gedai_map, wh_type_map, std_price_map, r_name_map, f"{used_label} (新原価 {len(cost_map):,}件)"
+    return cost_map, gedai_map, wh_type_map, std_price_map, r_name_map, kamei_price_map, f"{used_label} (新原価 {len(cost_map):,}件 / 加盟店価格 {len(kamei_price_map):,}品番)"
 
 # =========================================================
 # ロジザード在庫CSV（名古屋・青山）の直接読み込み補完処理
@@ -1323,7 +1383,7 @@ df_yayoi, yayoi_src_label = load_yayoi_data(yayoi_src, all_sheets_raw)
 if gdrive_sync["yayoi_filename"] and up_yayoi is None and "ローカル" not in yayoi_src_label:
     yayoi_src_label = gdrive_sync["yayoi_filename"]
 
-cost_map, gedai_map, wh_type_map, std_price_map, r_name_map, cost_src_label = load_order_r_cost_master(order_r_src)
+cost_map, gedai_map, wh_type_map, std_price_map, r_name_map, kamei_price_map, cost_src_label = load_order_r_cost_master(order_r_src)
 if gdrive_sync["order_r_filename"] and up_order_r is None and "ローカル" not in cost_src_label:
     cost_src_label = f"{gdrive_sync['order_r_filename']} (新原価 {len(cost_map):,}件)"
 
@@ -1607,6 +1667,7 @@ with tab1:
     yayoi_rank_json = json.dumps(yayoi_cust_rank_map, ensure_ascii=False)
     sales_comp_json = json.dumps(sales_comp_map, ensure_ascii=False)
     sales_det_json = json.dumps(sales_det_map, ensure_ascii=False)
+    kamei_json = json.dumps(kamei_price_map, ensure_ascii=False)
     hist_json = json.dumps(hist_dict, ensure_ascii=False)
     prev_title_html = prev_col_title.replace("(", "<br>(")
 
@@ -1799,10 +1860,11 @@ with tab1:
 
     <div class="modal-overlay" id="detail-modal" onclick="closeModalOnBg(event)">
         <div class="modal-window">
-            <div class="modal-header">
+<div class="modal-header">
                 <div class="modal-title" id="modal-title-text">📦 品番詳細・内訳データ</div>
                 <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-                    <button class="mode-btn" id="btn-mode-sales" onclick="switchModalMode('sales', 'THIS_WEEK')">🔥 週次・期別の購入先（売上・粗利）内訳</button>
+                    <button class="mode-btn" id="btn-mode-sales" onclick="switchModalMode('sales', '今期(26/7〜)')">🔥 購入先（売上・粗利）内訳</button>
+                    <button class="mode-btn" id="btn-mode-kamei" onclick="switchModalMode('kamei', '')">💴 会社別の販売価格（加盟店価格）一覧</button>
                     <button class="mode-btn" id="btn-mode-zure" onclick="switchModalMode('zure', '')">⚖️ 確保ズレ診断＆全ズレ商品一覧</button>
                     <button class="mode-btn" id="btn-mode-yayoi" onclick="switchModalMode('yayoi', '')">🏢 弥生確保リスト（すべて）</button>
                     <button class="modal-close" onclick="closeModal()">✕ 閉じる</button>
@@ -1854,6 +1916,7 @@ with tab1:
         const yayoiRankMap = {yayoi_rank_json};
         const salesCompMap = {sales_comp_json};
         const salesDetMap = {sales_det_json};
+        const kameiPriceMap = {kamei_json};
         const histMap = {hist_json};
         const thisWeekLabel = "{this_w_label}";
         const prevWeekLabel = "{prev_w_label}";
@@ -1875,6 +1938,21 @@ with tab1:
             const s = String(val).trim();
             if (/^[0-9,.]+$/.test(s)) return "";
             return s;
+        }}
+
+        // 会社名から加盟店価格（order_r）を曖昧一致で検索するヘルパー関数
+        function findCompanyKameiPrice(codeNorm, targetCompName) {{
+            const kList = kameiPriceMap[codeNorm] || [];
+            if (!targetCompName || kList.length === 0) return null;
+            const cleanTarget = String(targetCompName).replace(/株式会社|有限会社|\(株\)|（株）|㈱|㈲|\s| /g, "");
+            if (!cleanTarget) return null;
+            for (const item of kList) {{
+                const cleanK = String(item["会社名"] || "").replace(/株式会社|有限会社|\(株\)|（株）|㈱|㈲|\s| /g, "");
+                if (cleanK && (cleanTarget.includes(cleanK) || cleanK.includes(cleanTarget))) {{
+                    return item["販売価格"];
+                }}
+            }}
+            return null;
         }}
 
         const savedEdits = JSON.parse(localStorage.getItem("hattyu_edits_v6") || "{{}}");
@@ -2020,7 +2098,7 @@ with tab1:
                     <td class="w-num ${{konkiCls}}"><span class="click-link-konki" onclick="openModal(${{idx}}, 'sales', '今期(26/7〜)')">${{konkiVal > 0 ? "🔥 " + fmtNum(konkiVal) : "0"}}</span></td>
                     <td class="w-num bg-hist-ki"><span class="click-link-ki" onclick="openModal(${{idx}}, 'sales', 'PREV_WEEK')">${{fmtNum(prevWVal)}}</span></td>
                     <td class="w-num ${{thisWCls}}"><span class="click-link-konki" onclick="openModal(${{idx}}, 'sales', 'THIS_WEEK')">${{thisWVal > 0 ? "⚡ " + fmtNum(thisWVal) : "0"}}</span></td>
-                    <td class="w-num" style="background:#f0fdf4; font-weight:bold;">¥${{fmtNum(r["新原価"])}}</td>
+                    <td class="w-num" style="background:#f0fdf4; font-weight:bold;"><span class="click-link-profit" onclick="openModal(${{idx}}, 'kamei', '')">¥${{fmtNum(r["新原価"])}}</span></td>
                     <td class="w-money" style="background:#f0fdf4;"><span class="click-link-profit" onclick="openModal(${{idx}}, 'sales', '今期(26/7〜)')">¥${{fmtNum(r["売上高"])}}</span></td>
                     <td class="w-money bg-profit"><span class="click-link-profit" onclick="openModal(${{idx}}, 'sales', '今期(26/7〜)')">¥${{fmtNum(r["粗利額"])}}</span></td>
                     <td class="w-num" style="background:#f0fdf4; font-weight:bold;"><span class="click-link-profit" onclick="openModal(${{idx}}, 'sales', '今期(26/7〜)')">${{r["粗利率"]}}%</span></td>
@@ -2064,35 +2142,94 @@ with tab1:
 
         function switchModalMode(mode, kiStr) {{
             if (currentModalIdx === null) return;
-            openModal(currentModalIdx, mode, kiStr || "THIS_WEEK");
+            openModal(currentModalIdx, mode, kiStr || "今期(26/7〜)");
+        }}
+
+        // 会社別販売価格（加盟店価格）テーブルのHTMLを生成する共通関数
+        function buildKameiPriceTableHtml(codeNorm, unitCost, minGedai) {{
+            const kList = kameiPriceMap[codeNorm] || [];
+            if (kList.length === 0) {{
+                return `<div style="padding:14px; background:#f8fafc; color:#64748b; border:1px solid #cbd5e1; border-radius:6px;">
+                    この品番（${{codeNorm}}）は『order_r（マスター）.xlsx』の「加盟店価格」シートに個別登録がありません。（標準最低下代: ¥${{fmtNum(minGedai)}} ／ 商品原価: ¥${{fmtNum(unitCost)}}）
+                </div>`;
+            }}
+            let html = `<table class="sub-table"><thead><tr>
+                <th style="width:50px;">No</th>
+                <th>会社名（加盟店名 / ランク名）</th>
+                <th style="width:95px;">グループ連番</th>
+                <th style="width:80px;">ロット数</th>
+                <th style="width:130px; background:#fef3c7; color:#b45309;">販売価格(ロット単価)</th>
+                <th style="width:110px;">商品原価</th>
+                <th style="width:120px;">1個あたり粗利</th>
+                <th style="width:95px;">粗利率</th>
+                <th style="width:120px;">最低下代(¥${{fmtNum(minGedai)}})比</th>
+            </tr></thead><tbody>`;
+            kList.forEach((kp, idx) => {{
+                const sp = Number(kp["販売価格"] || 0);
+                const prof = sp - unitCost;
+                const mRate = (sp > 0 && unitCost > 0) ? ((prof / sp) * 100).toFixed(1) + "%" : "—";
+                const diffGedai = (minGedai > 0) ? (sp - minGedai) : 0;
+                const diffStr = (minGedai > 0) ? ((diffGedai >= 0 ? "+" : "") + fmtNum(diffGedai) + "円") : "—";
+                const diffColor = (diffGedai < 0) ? "color:#be123c; font-weight:bold;" : "color:#047857;";
+                html += `<tr>
+                    <td style="text-align:center;">${{idx + 1}}</td>
+                    <td style="font-weight:bold; color:#1e293b;">${{kp["会社名"]}}</td>
+                    <td style="text-align:center; color:#64748b;">${{kp["グループ"] || "—"}}</td>
+                    <td style="text-align:center;">${{fmtNum(kp["ロット数"])}}</td>
+                    <td style="text-align:right; font-weight:bold; color:#b45309; background:#fffbeb; font-size:15.5px;">¥${{fmtNum(sp)}}</td>
+                    <td style="text-align:right;">¥${{fmtNum(unitCost)}}</td>
+                    <td style="text-align:right; font-weight:bold; color:${{prof>=0?'#047857':'#be123c'}}; background:#ecfdf5;">¥${{fmtNum(prof)}}</td>
+                    <td style="text-align:right; font-weight:bold;">${{mRate}}</td>
+                    <td style="text-align:right; ${{diffColor}}">${{diffStr}}</td>
+                </tr>`;
+            }});
+            html += `</tbody></table>`;
+            return html;
         }}
 
         function openModal(idx, mode, kiStr) {{
             currentModalIdx = idx;
             currentModalMode = mode;
-            currentKiFilter = kiStr || "THIS_WEEK";
+            currentKiFilter = kiStr || "今期(26/7〜)";
             const r = tableData[idx];
             const code = r["品番"];
             const codeNorm = r["品番_正規化"] || code;
+            const unitCost = Number(r["新原価"] || 0);
+            const minGedai = Number(r["最低下代"] || 0);
 
             document.getElementById("btn-mode-sales").className = (mode === 'sales') ? "mode-btn active" : "mode-btn";
+            document.getElementById("btn-mode-kamei").className = (mode === 'kamei') ? "mode-btn active" : "mode-btn";
             document.getElementById("btn-mode-zure").className = (mode === 'zure') ? "mode-btn active" : "mode-btn";
             document.getElementById("btn-mode-yayoi").className = (mode === 'yayoi') ? "mode-btn active" : "mode-btn";
 
             document.getElementById("modal-title-text").innerHTML = `📦 品番: 【${{code}}】 ${{r["商品区分"]}} ｜ ${{r["バッジ表示"]}} （拠点: ${{r["商品センター"]}}）`;
+
+            // ★ サマリーバーの一番目立つ位置に「商品原価（新原価）」と「最低下代」を常時表示！
             document.getElementById("modal-summary").innerHTML = `
+                <div class="summary-item" style="background:#dcfce7; padding:4px 12px; border-radius:6px; border:1px solid #86efac;">
+                    💰 商品原価(新原価): <span style="color:#047857; font-size:19px;">¥${{fmtNum(unitCost)}}</span>
+                </div>
+                <div class="summary-item" style="background:#fef9c3; padding:4px 12px; border-radius:6px; border:1px solid #fde047;">
+                    🏷️ 最低下代: <span style="color:#b45309; font-size:19px;">¥${{fmtNum(minGedai)}}</span>
+                </div>
                 <div class="summary-item">先週/今週売数: <span style="color:#b45309;">${{fmtNum(r["先週売数"])}} → ⚡${{fmtNum(r["今週売数"])}} 個</span></div>
-                <div class="summary-item">🔥今期(26/7〜): <span style="color:#ea580c;">${{fmtNum(r["今期出荷"])}} 個</span></div>
-                <div class="summary-item">新原価 / 最低下代: <span style="color:#047857;">¥${{fmtNum(r["新原価"])}} / ¥${{fmtNum(r["最低下代"])}}</span></div>
-                <div class="summary-item">売上高 / 粗利額: <span style="color:#047857;">¥${{fmtNum(r["売上高"])}} / ¥${{fmtNum(r["粗利額"])}} (${{r["粗利率"]}}%)</span></div>
-                <div class="summary-item">フリー在庫: <span>${{fmtNum(r["入荷後のフリー在庫"])}} (在庫金額: ¥${{fmtNum(r["在庫金額"])}})</span></div>
+                <div class="summary-item">🔥今期(26/7〜)出荷: <span style="color:#ea580c;">${{fmtNum(r["今期出荷"])}} 個</span></div>
+                <div class="summary-item">今期売上 / 今期粗利: <span style="color:#047857;">¥${{fmtNum(r["売上高"])}} / ¥${{fmtNum(r["粗利額"])}} (${{r["粗利率"]}}%)</span></div>
+                <div class="summary-item">フリー在庫: <span>${{fmtNum(r["入荷後のフリー在庫"])}} 個</span></div>
             `;
             document.getElementById("modal-view-prev").value = r["前回決定事項"] || "";
             document.getElementById("modal-input-ndate").value = r["入荷予定日_ロジザード"] || "";
             document.getElementById("modal-input-dec").value = r["決定事項"] || "";
             document.getElementById("modal-input-odate").value = r["発注日"] || "";
 
-            if (mode === 'sales') {{
+            // モードA：会社別の販売価格（加盟店価格）一覧モード
+            if (mode === 'kamei') {{
+                const kCount = (kameiPriceMap[codeNorm] || []).length;
+                document.getElementById("modal-sub-title").innerHTML = `💴 【${{code}}】会社ごとの販売価格一覧（order_r『加盟店価格』シート参照：全 ${{kCount}} 件）`;
+                document.getElementById("modal-yayoi-area").innerHTML = buildKameiPriceTableHtml(codeNorm, unitCost, minGedai);
+            }}
+            // モードB：売上実績・購入先内訳モード（会社ごとの加盟店価格も並べて表示！）
+            else if (mode === 'sales') {{
                 let kiTitle = currentKiFilter;
                 if (currentKiFilter === 'THIS_WEEK') kiTitle = thisWeekLabel;
                 else if (currentKiFilter === 'PREV_WEEK') kiTitle = prevWeekLabel;
@@ -2111,28 +2248,39 @@ with tab1:
                         <button class="stamp-btn" style="${{currentKiFilter==='ALL'?'background:#047857;color:#fff;':''}}" onclick="openModal(${{idx}}, 'sales', 'ALL')">💰 全期間累計</button>
                     </div>
                 `;
-                document.getElementById("modal-sub-title").innerHTML = `🔥 【${{code}}】どこで売れたか（得意先別 売上・粗利内訳：${{kiTitle}}）`;
+                document.getElementById("modal-sub-title").innerHTML = `🔥 【${{code}}】どこで売れたか（得意先別 売上・粗利・加盟店販売価格：${{kiTitle}}）`;
 
                 const codeSalesObj = salesCompMap[codeNorm] || {{}};
                 const compList = codeSalesObj[currentKiFilter] || [];
                 const detList = salesDetMap[codeNorm] || [];
-                const yayoiRankList = yayoiRankMap[codeNorm] || [];
-                const unitCost = Number(r["新原価"] || 0);
 
                 let sHtml = kiBtnsHtml;
                 if (compList.length > 0) {{
-                    sHtml += `<table class="sub-table"><thead><tr><th style="width:50px;">順位</th><th>購入先（得意先名）</th><th style="width:110px;">購入数量</th><th style="width:80px;">構成比</th><th style="width:120px;">売上金額</th><th style="width:120px;">粗利額(新原価計算)</th><th style="width:80px;">伝票回数</th><th style="width:110px;">最終売上日</th></tr></thead><tbody>`;
+                    sHtml += `<table class="sub-table"><thead><tr>
+                        <th style="width:45px;">順位</th>
+                        <th>購入先（得意先名）</th>
+                        <th style="width:105px;">購入数量</th>
+                        <th style="width:75px;">構成比</th>
+                        <th style="width:125px; background:#fef3c7; color:#b45309;">販売価格(加盟店価格)</th>
+                        <th style="width:115px;">売上金額</th>
+                        <th style="width:115px;">粗利額(新原価計算)</th>
+                        <th style="width:75px;">伝票数</th>
+                        <th style="width:105px;">最終売上日</th>
+                    </tr></thead><tbody>`;
                     compList.forEach((c, cIdx) => {{
                         const cQty = Number(c["数量"] || 0);
-                        const unitPrice = Number(r["平均単価"] || r["最低下代"] || 0);
+                        const kPrice = findCompanyKameiPrice(codeNorm, c["得意先名"]);
+                        const fallbackUnitP = kPrice || Number(r["平均単価"] || minGedai || 0);
                         const rawAmt = Number(c["金額"] || 0);
-                        const cAmt = (rawAmt > cQty * unitCost) ? rawAmt : Math.round(cQty * unitPrice);
+                        const cAmt = (rawAmt >= cQty * unitCost && rawAmt > 0) ? rawAmt : Math.round(cQty * fallbackUnitP);
+                        const dispUnitP = kPrice ? `¥${{fmtNum(kPrice)}} (登録値)` : (cQty > 0 ? `¥${{fmtNum(Math.round(cAmt / cQty))}} (実売/下代)` : "—");
                         const cProf = (cAmt > 0 && unitCost > 0) ? Math.max(0, Math.round(cAmt - (cQty * unitCost))) : 0;
                         sHtml += `<tr>
                             <td style="text-align:center; font-weight:bold;">${{cIdx + 1}}</td>
                             <td style="font-weight:bold; color:#1e293b;">${{c["得意先名"]}}</td>
                             <td style="text-align:right; font-weight:bold; color:#ea580c; background:#fff7ed; font-size:15.5px;">${{fmtNum(cQty)}} 個</td>
                             <td style="text-align:right; font-weight:bold;">${{c["構成比"]}}</td>
+                            <td style="text-align:right; font-weight:bold; color:#b45309; background:#fffbeb;">${{dispUnitP}}</td>
                             <td style="text-align:right;">¥${{fmtNum(cAmt)}}</td>
                             <td style="text-align:right; font-weight:bold; color:#047857; background:#ecfdf5;">¥${{fmtNum(cProf)}}</td>
                             <td style="text-align:center;">${{fmtNum(c["伝票回数"])}} 回</td>
@@ -2140,46 +2288,36 @@ with tab1:
                         </tr>`;
                     }});
                     sHtml += `</tbody></table>`;
-
-                    if (detList.length > 0) {{
-                        sHtml += `<div class="sec-title" style="margin-top:18px;">📄 売上伝票明細（最新60件）</div>`;
-                        sHtml += `<table class="sub-table"><thead><tr><th style="width:95px;">期間区分</th><th style="width:110px;">売上日</th><th>得意先名</th><th style="width:95px;">数量</th><th style="width:115px;">売上金額</th><th style="width:90px;">担当者</th></tr></thead><tbody>`;
-                        detList.forEach(d => {{
-                            sHtml += `<tr>
-                                <td style="text-align:center; font-weight:bold;">${{d["期"]}}</td>
-                                <td style="text-align:center; font-weight:bold;">${{d["日付"]}}</td>
-                                <td style="font-weight:bold;">${{d["得意先名"]}}</td>
-                                <td style="text-align:right; font-weight:bold; color:#0284c7;">${{fmtNum(d["数量"])}}</td>
-                                <td style="text-align:right;">¥${{fmtNum(d["金額"])}}</td>
-                                <td style="text-align:center;">${{d["担当者"]}}</td>
-                            </tr>`;
-                        }});
-                        sHtml += `</tbody></table>`;
-                    }}
                 }} else {{
                     sHtml += `<div class="diag-box" style="background:#f8fafc; border:1px solid #cbd5e1; color:#334155;">
                         <b>📊 期間（${{kiTitle}}）のyayoi_CSV売上明細は 0 件です。</b><br>
-                        上の「期間切替」ボタンで <b>「🔥今期 26/7〜」</b> や <b>「💰全期間累計」</b> をクリックすると、他の期間に売れた会社一覧を確認できます。
+                        上の「期間切替」ボタンで他の期間に切り替えるか、下の『会社ごとの販売価格（加盟店価格）一覧』をご確認ください。
                     </div>`;
+                }}
 
-                    if (yayoiRankList.length > 0) {{
-                        sHtml += `<div class="sec-title">🏢 現在の『在庫確保.xlsx』における大口注文・確保先ランキング</div>`;
-                        sHtml += `<table class="sub-table"><thead><tr><th style="width:55px;">順位</th><th>得意先名（確保依頼元）</th><th style="width:120px;">確保数量 合計</th><th style="width:90px;">構成比</th><th style="width:95px;">伝票数</th><th style="width:120px;">最終受注日</th></tr></thead><tbody>`;
-                        yayoiRankList.forEach((yr, yIdx) => {{
-                            sHtml += `<tr>
-                                <td style="text-align:center; font-weight:bold;">${{yIdx + 1}}</td>
-                                <td style="font-weight:bold; color:#1e293b;">${{yr["得意先名"]}}</td>
-                                <td style="text-align:right; font-weight:bold; color:#0284c7; background:#f0f9ff; font-size:15.5px;">${{fmtNum(yr["数量"])}} 個</td>
-                                <td style="text-align:right; font-weight:bold;">${{yr["構成比"]}}</td>
-                                <td style="text-align:center;">${{fmtNum(yr["伝票回数"])}} 件</td>
-                                <td style="text-align:center;">${{yr["最終受注日"]}}</td>
-                            </tr>`;
-                        }});
-                        sHtml += `</tbody></table>`;
-                    }}
+                // 下段に常時「会社ごとの販売価格（order_r 加盟店価格）」一覧も併設表示
+                const kCount = (kameiPriceMap[codeNorm] || []).length;
+                sHtml += `<div class="sec-title" style="margin-top:18px;">💴 この商品の『会社ごとの販売価格（order_r 加盟店価格シート）』登録一覧（全 ${{kCount}} 件）</div>`;
+                sHtml += buildKameiPriceTableHtml(codeNorm, unitCost, minGedai);
+
+                if (detList.length > 0) {{
+                    sHtml += `<div class="sec-title" style="margin-top:18px;">📄 売上伝票明細（最新60件）</div>`;
+                    sHtml += `<table class="sub-table"><thead><tr><th style="width:95px;">期間区分</th><th style="width:110px;">売上日</th><th>得意先名</th><th style="width:95px;">数量</th><th style="width:115px;">売上金額</th><th style="width:90px;">担当者</th></tr></thead><tbody>`;
+                    detList.forEach(d => {{
+                        sHtml += `<tr>
+                            <td style="text-align:center; font-weight:bold;">${{d["期"]}}</td>
+                            <td style="text-align:center; font-weight:bold;">${{d["日付"]}}</td>
+                            <td style="font-weight:bold;">${{d["得意先名"]}}</td>
+                            <td style="text-align:right; font-weight:bold; color:#0284c7;">${{fmtNum(d["数量"])}}</td>
+                            <td style="text-align:right;">¥${{fmtNum(d["金額"])}}</td>
+                            <td style="text-align:center;">${{d["担当者"]}}</td>
+                        </tr>`;
+                    }});
+                    sHtml += `</tbody></table>`;
                 }}
                 document.getElementById("modal-yayoi-area").innerHTML = sHtml;
             }}
+            // モードC：確保数のズレ診断モード
             else if (mode === 'zure') {{
                 document.getElementById("modal-sub-title").innerHTML = `⚖️ 【${{code}}】確保数のズレ原因診断 ＆ 全ズレ商品リスト`;
                 const rojiSec = Number(r["確保数_ロジザード"] || 0);
@@ -2204,24 +2342,6 @@ with tab1:
                         ・ロジザード側の確保数: <b>${{fmtNum(rojiSec)}}</b> 個 ／ 弥生販売側の確保合計: <b>${{fmtNum(yayoiSec)}}</b> 個<br>
                         👉 <b>主な原因</b>：弥生販売側ではすでに出荷売上済（またはキャンセル消込済）なのに、<b>ロジザード側の確保枠から外し忘れている</b>か、リンベル確保分（<b>${{fmtNum(r["リンベル確保数"] || 0)}}</b> 個）などがロジザード側に入っている可能性があります。
                     </div>`;
-                }}
-
-                const thisYayoiList = yayoiMap[codeNorm] || [];
-                if (thisYayoiList.length > 0) {{
-                    diagHtml += `<div class="sec-title">📋 この商品（${{code}}）の弥生確保 登録明細（全 ${{thisYayoiList.length}} 件）</div>`;
-                    diagHtml += `<table class="sub-table" style="margin-bottom:18px;"><thead><tr><th>受注番号</th><th>得意先名</th><th>数量</th><th>受注日</th><th>納入期日</th><th>倉庫名</th><th>備考</th></tr></thead><tbody>`;
-                    thisYayoiList.forEach(y => {{
-                        diagHtml += `<tr>
-                            <td style="text-align:center; font-weight:bold;">${{y["受注番号"] || ""}}</td>
-                            <td style="font-weight:bold;">${{y["得意先名"]}}</td>
-                            <td style="text-align:right; font-weight:bold; color:#be123c; background:#fff1f2;">${{fmtNum(y["数量"])}}</td>
-                            <td style="text-align:center;">${{y["受注日"]}}</td>
-                            <td style="text-align:center;">${{y["納入期日"]}}</td>
-                            <td style="text-align:center;">${{y["倉庫名"] || ""}}</td>
-                            <td>${{y["備考"]}}</td>
-                        </tr>`;
-                    }});
-                    diagHtml += `</tbody></table>`;
                 }}
 
                 const allZureRows = tableData.filter(item => Number(item["確保数のズレ"] || 0) !== 0)
@@ -2255,19 +2375,35 @@ with tab1:
                 diagHtml += `</tbody></table>`;
                 document.getElementById("modal-yayoi-area").innerHTML = diagHtml;
             }}
+            // モードD：弥生確保リスト（会社ごとの加盟店販売価格も表示）
             else {{
-                document.getElementById("modal-sub-title").innerHTML = "🏢 得意先別・弥生確保リスト（2027年以降を含む全受注を表示）";
+                document.getElementById("modal-sub-title").innerHTML = "🏢 得意先別・弥生確保リスト（会社別の加盟店販売価格つき）";
                 const targetList = yayoiMap[codeNorm] || [];
 
                 if (targetList.length === 0) {{
-                    document.getElementById("modal-yayoi-area").innerHTML = `<div style="padding:16px; font-size:14.5px; color:#64748b; background:#f8fafc;">該当する受注確保データはありません。</div>`;
+                    document.getElementById("modal-yayoi-area").innerHTML = `<div style="padding:16px; font-size:14.5px; color:#64748b; background:#f8fafc;">該当する受注確保データはありません。</div>` +
+                        `<div class="sec-title" style="margin-top:18px;">💴 この商品の『会社ごとの販売価格（order_r 加盟店価格）』登録一覧</div>` +
+                        buildKameiPriceTableHtml(codeNorm, unitCost, minGedai);
                 }} else {{
-                    let yHtml = `<table class="sub-table"><thead><tr><th>受注番号</th><th>得意先名</th><th>数量</th><th>受注日</th><th>納入期日</th><th>倉庫名</th><th>担当者</th><th>備考</th></tr></thead><tbody>`;
+                    let yHtml = `<table class="sub-table"><thead><tr>
+                        <th>受注番号</th>
+                        <th>得意先名</th>
+                        <th style="width:100px;">確保数量</th>
+                        <th style="width:125px; background:#fef3c7; color:#b45309;">販売価格(加盟店価格)</th>
+                        <th>受注日</th>
+                        <th>納入期日</th>
+                        <th>倉庫名</th>
+                        <th>担当者</th>
+                        <th>備考</th>
+                    </tr></thead><tbody>`;
                     targetList.forEach(y => {{
+                        const kp = findCompanyKameiPrice(codeNorm, y["得意先名"]);
+                        const kpStr = kp ? `¥${{fmtNum(kp)}}` : (minGedai > 0 ? `¥${{fmtNum(minGedai)}} (最低下代)` : "—");
                         yHtml += `<tr>
                             <td style="text-align:center; font-weight:bold;">${{y["受注番号"] || ""}}</td>
                             <td style="font-weight:bold;">${{y["得意先名"]}}</td>
                             <td style="text-align:right; font-weight:bold; color:#0284c7; font-size:15.5px;">${{fmtNum(y["数量"])}}</td>
+                            <td style="text-align:right; font-weight:bold; color:#b45309; background:#fffbeb;">${{kpStr}}</td>
                             <td style="text-align:center; font-weight:bold;">${{y["受注日"]}}</td>
                             <td style="text-align:center;">${{y["納入期日"]}}</td>
                             <td style="text-align:center; font-weight:bold;">${{y["倉庫名"] || ""}}</td>
@@ -2276,6 +2412,8 @@ with tab1:
                         </tr>`;
                     }});
                     yHtml += `</tbody></table>`;
+                    yHtml += `<div class="sec-title" style="margin-top:18px;">💴 この商品の『会社ごとの販売価格（order_r 加盟店価格）』登録一覧</div>`;
+                    yHtml += buildKameiPriceTableHtml(codeNorm, unitCost, minGedai);
                     document.getElementById("modal-yayoi-area").innerHTML = yHtml;
                 }}
             }}
