@@ -11,12 +11,7 @@ import time
 import re
 import math
 import urllib.request
-
-try:
-    from supabase import create_client, Client
-except ImportError:
-    create_client = None
-    Client = None
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 st.set_page_config(page_title="発注検討表 ＆ 弥生受注管理システム（Googleドライブ完全連動版）", layout="wide")
 
@@ -49,9 +44,6 @@ st.markdown("""
 GDRIVE_ORDER_URL = "https://docs.google.com/spreadsheets/d/1JequkGmSRMwoo9rK5HAodfnY6foXl-F2/edit?usp=drive_link"
 # ② 在庫確保.xlsx のGoogleドライブURL（空欄でも同じGoogleドライブ内から自動検索します）
 GDRIVE_KAKUHO_URL = ""
-
-SUPABASE_URL = "https://zyeemvbskaefbtfxurdw.supabase.co"
-SUPABASE_KEY = "sb_publishable_S19HrcRBy63BGNbsSq69Xg_pZ05d3Z3"
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in locals() else "."
 MANUAL_YAYOI_CSV = os.path.join(SCRIPT_DIR, "yayoi_manual_additions.csv")
@@ -89,6 +81,12 @@ def parse_jp_date(val):
     s = clean_str(val)
     if not s:
         return pd.NaT, ""
+    # 8桁数値 (例: 20251216) の対応
+    s_digits = s.replace("-", "").replace("/", "")
+    if len(s_digits) == 8 and s_digits.isdigit():
+        dt = pd.to_datetime(s_digits, format="%Y%m%d", errors="coerce")
+        if pd.notna(dt):
+            return dt, dt.strftime("%Y-%m-%d")
     s_norm = re.sub(r'(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日?', r'\1-\2-\3', s)
     s_norm = s_norm.replace("/", "-").split(" ")[0]
     dt = pd.to_datetime(s_norm, errors="coerce")
@@ -145,7 +143,7 @@ def read_excel_safely(src, sheet_name=0, header=None):
     if isinstance(src, bytes):
         raw_bytes = src
     elif hasattr(src, "getvalue"):
-        raw_bytes = src.getvalue()
+        raw_bytes = file_source_bytes(src)
     elif isinstance(src, str) and os.path.exists(src):
         with open(src, "rb") as f:
             raw_bytes = f.read()
@@ -169,32 +167,41 @@ def read_excel_safely(src, sheet_name=0, header=None):
             return pd.DataFrame(rows[header + 1:], columns=cols)
         return pd.DataFrame(rows)
 
+def file_source_bytes(src):
+    if hasattr(src, "getvalue"):
+        return src.getvalue()
+    return None
+
 # =========================================================
 # Googleドライブ接続・ファイル自動取得処理
 # =========================================================
-def get_gdrive_service():
+def get_gdrive_creds_info():
     try:
-        from google.oauth2 import service_account
-        from googleapiclient.discovery import build
-        creds_info = None
         if "gcp_service_account" in st.secrets:
-            creds_info = dict(st.secrets["gcp_service_account"])
+            return dict(st.secrets["gcp_service_account"])
         elif "google_service_account" in st.secrets:
-            creds_info = dict(st.secrets["google_service_account"])
+            return dict(st.secrets["google_service_account"])
         elif "private_key" in st.secrets and "client_email" in st.secrets:
-            creds_info = dict(st.secrets)
+            return dict(st.secrets)
         else:
             for k in st.secrets:
                 val = st.secrets[k]
                 if hasattr(val, "keys") and "private_key" in val:
-                    creds_info = dict(val)
-                    break
+                    return dict(val)
                 elif isinstance(val, str) and "private_key" in val:
                     try:
-                        creds_info = json.loads(val)
-                        break
+                        return json.loads(val)
                     except Exception:
                         pass
+    except Exception:
+        pass
+    return None
+
+def get_gdrive_service():
+    try:
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+        creds_info = get_gdrive_creds_info()
         if creds_info:
             creds = service_account.Credentials.from_service_account_info(
                 creds_info, scopes=["https://www.googleapis.com/auth/drive.readonly"]
@@ -214,7 +221,7 @@ def download_file_by_id(service, file_id: str):
             done = False
             while not done:
                 _, done = downloader.next_chunk()
-            if len(fh.getvalue()) > 500:
+            if len(fh.getvalue()) > 0:
                 return fh.getvalue(), "Google Drive API"
         except Exception:
             try:
@@ -227,7 +234,7 @@ def download_file_by_id(service, file_id: str):
                 done = False
                 while not done:
                     _, done = downloader.next_chunk()
-                if len(fh.getvalue()) > 500:
+                if len(fh.getvalue()) > 0:
                     return fh.getvalue(), "Google Drive API (スプレッドシート)"
             except Exception:
                 pass
@@ -242,13 +249,13 @@ def download_file_by_id(service, file_id: str):
             req = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"})
             with urllib.request.urlopen(req, timeout=20) as resp:
                 data = resp.read()
-                if len(data) > 1000 and data[:2] == b'PK':
+                if len(data) > 500 and data[:2] == b'PK':
                     return data, "Googleドライブ共有リンク"
         except Exception:
             continue
     return None, None
 
-@st.cache_data(ttl=3600, show_spinner="☁️ Googleドライブから最新データを同期中...")
+@st.cache_data(ttl=3600, show_spinner="☁️ Googleドライブから発注検討表・在庫確保データを同期中...")
 def sync_all_files_from_gdrive(order_url: str, kakuho_url: str = ""):
     m_ord = re.search(r'/d/([a-zA-Z0-9_-]+)', order_url or "")
     target_ord_id = m_ord.group(1) if m_ord else ""
@@ -264,7 +271,6 @@ def sync_all_files_from_gdrive(order_url: str, kakuho_url: str = ""):
         "yayoi_filename": "",
         "comp_bytes": None,
         "item_bytes": None,
-        "sales_files": [],
         "source_label": "",
         "error_detail": ""
     }
@@ -286,10 +292,10 @@ def sync_all_files_from_gdrive(order_url: str, kakuho_url: str = ""):
 
     if service is not None:
         try:
-            q = "trashed = false and (name contains '在庫確保' or name contains '弥生確保' or name contains '確保リスト' or name contains '発注検討表' or name contains '弥生会社名' or name contains '弥生商品番号' or name contains '売上' or name contains '出荷' or name contains 'sales')"
+            q = "trashed = false and (name contains '在庫確保' or name contains '弥生確保' or name contains '確保リスト' or name contains '発注検討表' or name contains '弥生会社名' or name contains '弥生商品番号')"
             res = service.files().list(
                 q=q,
-                pageSize=60,
+                pageSize=50,
                 fields="files(id, name, modifiedTime)",
                 orderBy="modifiedTime desc",
                 supportsAllDrives=True,
@@ -332,42 +338,36 @@ def sync_all_files_from_gdrive(order_url: str, kakuho_url: str = ""):
                     b, _ = download_file_by_id(service, fid)
                     if b:
                         result["item_bytes"] = b
-                elif len(result["sales_files"]) < 8 and any(k in fname.lower() for k in ["売上", "出荷", "sales"]) and fname.lower().endswith((".csv", ".xlsx")):
-                    b, _ = download_file_by_id(service, fid)
-                    if b:
-                        result["sales_files"].append((fname, b))
         except Exception:
             pass
 
     return result
 
-def find_local_file(keywords, ext=".xlsx"):
-    for fn in os.listdir(SCRIPT_DIR):
-        if fn.lower().endswith(ext) and not fn.startswith("~$"):
-            if any(k in fn for k in keywords):
-                return os.path.join(SCRIPT_DIR, fn)
-    return None
+# =========================================================
+# Googleドライブ内の『yayoi_XXXX.csv』一括高速収集 ＆ 購入先ランキング構築
+# =========================================================
+def parse_yayoi_sales_csv(fname: str, raw_bytes: bytes) -> pd.DataFrame:
+    """
+    Googleドライブの『済』フォルダや年別フォルダに入っている yayoi_XXXX.csv を解析する関数。
+    ヘッダーありCSV・ヘッダーなし弥生標準CSVの両方に自動対応。
+    """
+    if not raw_bytes:
+        return pd.DataFrame()
 
-# =========================================================
-# 実績（購入先）データの自動集計処理（GDrive売上ファイル / Supabase対応）
-# =========================================================
-def parse_sales_df_from_bytes(fname: str, raw_bytes: bytes) -> pd.DataFrame:
     df = pd.DataFrame()
-    if fname.lower().endswith(".csv"):
-        for enc in ["utf-8-sig", "cp932", "shift_jis", "utf-8"]:
-            try:
-                df = pd.read_csv(io.BytesIO(raw_bytes), encoding=enc, low_memory=False)
-                if not df.empty and len(df.columns) >= 3:
-                    break
-            except Exception:
-                continue
-    else:
-        df = read_excel_safely(raw_bytes, sheet_name=0, header=0)
+    for enc in ["cp932", "shift_jis", "utf-8-sig", "utf-8"]:
+        try:
+            df = pd.read_csv(io.BytesIO(raw_bytes), encoding=enc, low_memory=False)
+            if not df.empty and len(df.columns) >= 3:
+                break
+        except Exception:
+            continue
 
     if df.empty:
         return pd.DataFrame()
 
     cols_str = [clean_str(c) for c in df.columns]
+
     def f_col(cands):
         for cand in cands:
             for orig_c, clean_c in zip(df.columns, cols_str):
@@ -375,19 +375,57 @@ def parse_sales_df_from_bytes(fname: str, raw_bytes: bytes) -> pd.DataFrame:
                     return orig_c
         return None
 
-    c_code = f_col(["商品コード", "品番", "型番", "code"])
-    c_cust = f_col(["得意先名称", "得意先名", "会社名", "販売先", "顧客名", "cust"])
-    c_qty = f_col(["数量", "売上数", "出荷数", "個数", "qty"])
-    c_amt = f_col(["金額", "売上金額", "税抜金額", "amount"])
-    c_dt = f_col(["売上日", "出荷日", "伝票日付", "日付", "date"])
-    c_stf = f_col(["担当者名", "担当者", "staff"])
+    c_code = f_col(["商品コード", "品番", "型番", "商品番号", "code"])
+    c_cust = f_col(["得意先名称", "得意先名", "会社名", "販売先", "顧客名", "得意先略称", "cust"])
+    c_qty = f_col(["数量", "売上数", "出荷数", "個数", "バラ数", "qty"])
+    c_amt = f_col(["金額", "売上金額", "税抜金額", "明細金額", "amount"])
+    c_dt = f_col(["売上日", "出荷日", "伝票日付", "日付", "受注日", "date"])
+    c_stf = f_col(["担当者名", "担当者", "入力者", "staff"])
 
-    if c_code is None or c_cust is None or c_qty is None:
+    # もし1行目が見出しではなくデータ行（ヘッダーなし弥生CSV）だった場合の自動列推定
+    if c_code is None or c_qty is None:
+        for enc in ["cp932", "shift_jis", "utf-8-sig", "utf-8"]:
+            try:
+                df_nohead = pd.read_csv(io.BytesIO(raw_bytes), encoding=enc, header=None, low_memory=False)
+                if not df_nohead.empty and len(df_nohead.columns) >= 15:
+                    df = df_nohead
+                    break
+            except Exception:
+                continue
+
+        # 弥生販売の売上伝票エクスポート形式（列パターン自動検出）
+        sample_row = [clean_str(x) for x in df.iloc[0].values]
+        code_col_idx = None
+        date_col_idx = None
+        for idx_c, val in enumerate(sample_row):
+            # AHL-1400 や ABO-08PK のような型番パターンを検出
+            if code_col_idx is None and re.match(r'^[A-Z]{2,4}-[0-9A-Z-]+$', val.upper()):
+                code_col_idx = idx_c
+            # 20251216 や 2025/12/16 のような日付パターンを検出
+            if date_col_idx is None and re.match(r'^202[0-9][-/\s年]?[01]?[0-9][-/\s月]?[0-3]?[0-9]', val):
+                date_col_idx = idx_c
+
+        if code_col_idx is not None:
+            c_code = df.columns[code_col_idx]
+            c_dt = df.columns[date_col_idx] if date_col_idx is not None else df.columns[1]
+            c_cust = df.columns[5] if len(df.columns) > 5 else df.columns[0]
+            # 型番列の後ろにある数値列から数量と金額を特定
+            c_qty = df.columns[min(code_col_idx + 4, len(df.columns) - 1)]
+            for offset_q in [4, 5, 3, 2, 6, 7, 8]:
+                if code_col_idx + offset_q < len(df.columns):
+                    v_test = clean_str(df.iloc[0, code_col_idx + offset_q]).replace(",", "")
+                    if v_test.replace("-", "").isdigit():
+                        c_qty = df.columns[code_col_idx + offset_q]
+                        break
+            c_amt = None
+            c_stf = None
+
+    if c_code is None or c_qty is None:
         return pd.DataFrame()
 
     out = pd.DataFrame()
     out["code_norm"] = df[c_code].apply(normalize_code)
-    out["cust"] = df[c_cust].apply(lambda x: clean_str(x) if clean_str(x) else "（得意先名なし）")
+    out["cust"] = df[c_cust].apply(lambda x: clean_str(x) if clean_str(x) else "（得意先名なし）") if c_cust is not None else "（得意先名なし）"
     out["qty"] = df[c_qty].apply(to_num)
     out["amount"] = df[c_amt].apply(to_num) if c_amt is not None else 0.0
     out["staff"] = df[c_stf].apply(clean_str) if c_stf is not None else ""
@@ -400,9 +438,9 @@ def parse_sales_df_from_bytes(fname: str, raw_bytes: bytes) -> pd.DataFrame:
         out["dt"] = pd.NaT
         out["date_fmt"] = ""
 
-    out = out[(out["code_norm"] != "") & (out["qty"] != 0)].copy()
+    # ファイル名 (例: yayoi_1216.csv) しかなく日付が欠損している場合の補完
+    out = out[(out["code_norm"] != "") & (~out["code_norm"].isin(["商品コード", "品番", "型番"])) & (out["qty"] != 0)].copy()
 
-    # 期（74期〜77期）の自動判定（7月〜翌6月）
     def calc_ki(ts):
         if pd.isna(ts):
             return "全期間"
@@ -414,49 +452,93 @@ def parse_sales_df_from_bytes(fname: str, raw_bytes: bytes) -> pd.DataFrame:
     out["ki"] = out["dt"].apply(calc_ki)
     return out
 
-@st.cache_data(ttl=3600)
-def build_sales_purchase_maps(sales_files_list, up_sales_bytes, up_sales_name, target_codes_tuple):
+@st.cache_data(ttl=3600, show_spinner="🔥 Googleドライブ内の『yayoi_XXXX.csv』から得意先別・期別の売上実績を集計中...")
+def fetch_and_build_yayoi_sales_from_gdrive(up_sales_bytes, up_sales_name, target_codes_tuple):
     target_set = set(target_codes_tuple)
     dfs = []
 
     if up_sales_bytes is not None and up_sales_name:
-        df_u = parse_sales_df_from_bytes(up_sales_name, up_sales_bytes)
+        df_u = parse_yayoi_sales_csv(up_sales_name, up_sales_bytes)
         if not df_u.empty:
             dfs.append(df_u)
 
-    for fn, b in (sales_files_list or []):
-        df_g = parse_sales_df_from_bytes(fn, b)
-        if not df_g.empty:
-            dfs.append(df_g)
+    creds_info = get_gdrive_creds_info()
+    csv_file_metas = []
 
-    # もしGDriveやアップロードに売上明細が無い場合、Supabaseが生きていればサイレント取得を試みる（エラーは一切出さない）
-    if not dfs and create_client is not None:
+    if creds_info is not None:
         try:
-            sb = create_client(SUPABASE_URL, SUPABASE_KEY)
-            res = sb.table("sales_data").select("商品コード, 得意先名, 担当者, 数量, 金額, 日付").order("日付", desc=True).limit(50000).execute()
-            if res.data:
-                df_sb = pd.DataFrame(res.data)
-                df_sb_parsed = parse_sales_df_from_bytes("supabase.csv", df_sb.to_csv(index=False).encode("utf-8"))
-                if not df_sb_parsed.empty:
-                    dfs.append(df_sb_parsed)
+            from google.oauth2 import service_account
+            from googleapiclient.discovery import build
+            creds = service_account.Credentials.from_service_account_info(
+                creds_info, scopes=["https://www.googleapis.com/auth/drive.readonly"]
+            )
+            service = build("drive", "v3", credentials=creds)
+
+            # 『yayoi_』から始まるCSVファイル（または売上CSV）を全サブフォルダから検索
+            page_token = None
+            q = "trashed = false and (name contains 'yayoi_' or name contains '弥生' or name contains '売上') and (mimeType contains 'csv' or name contains '.csv')"
+            while True:
+                res = service.files().list(
+                    q=q,
+                    pageSize=200,
+                    pageToken=page_token,
+                    fields="nextPageToken, files(id, name, size)",
+                    orderBy="modifiedTime desc",
+                    supportsAllDrives=True,
+                    includeItemsFromAllDrives=True
+                ).execute()
+                batch_files = res.get("files", [])
+                for f in batch_files:
+                    fn = f.get("name", "")
+                    if fn.lower().endswith(".csv") and not fn.startswith("~$"):
+                        csv_file_metas.append((f["id"], fn))
+                page_token = res.get("nextPageToken")
+                if not page_token or len(csv_file_metas) >= 600:
+                    break
         except Exception:
             pass
 
+    # マルチスレッド（12並列）でyayoi_XXXX.csvを高速ダウンロード＆パース
+    if csv_file_metas and creds_info is not None:
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+
+        def dl_and_parse_worker(meta_item):
+            fid, fname = meta_item
+            try:
+                c_obj = service_account.Credentials.from_service_account_info(
+                    creds_info, scopes=["https://www.googleapis.com/auth/drive.readonly"]
+                )
+                srv = build("drive", "v3", credentials=c_obj, cache_discovery=False)
+                raw_b = srv.files().get_media(fileId=fid, supportsAllDrives=True).execute()
+                if raw_b:
+                    df_p = parse_yayoi_sales_csv(fname, raw_b)
+                    if not df_p.empty:
+                        return df_p[df_p["code_norm"].isin(target_set)]
+            except Exception:
+                pass
+            return pd.DataFrame()
+
+        with ThreadPoolExecutor(max_workers=12) as executor:
+            futures = [executor.submit(dl_and_parse_worker, m_item) for m_item in csv_file_metas]
+            for fut in as_completed(futures):
+                df_res = fut.result()
+                if not df_res.empty:
+                    dfs.append(df_res)
+
     if not dfs:
-        return {}, {}, ""
+        return {}, {}, "", 0
 
     df_all = pd.concat(dfs, ignore_index=True)
     df_all = df_all[df_all["code_norm"].isin(target_set)].copy()
     if df_all.empty:
-        return {}, {}, ""
+        return {}, {}, "", len(csv_file_metas)
 
     comp_map = {}
     det_map = {}
 
-    # 1. 全期間集計 ("ALL") と 期別集計 ("74期", "75期", "76期", "77期") を両方作成
     for c_norm, grp_code in df_all.groupby("code_norm", sort=False):
         comp_map[c_norm] = {}
-        det_map[c_norm] = {}
 
         # 全期間ランキング
         c_grp_all = (
@@ -477,7 +559,7 @@ def build_sales_purchase_maps(sales_files_list, up_sales_bytes, up_sales_name, t
             for _, r in c_grp_all.head(50).iterrows()
         ]
 
-        # 期別ランキング
+        # 期別（74期〜77期）ランキング
         for ki_label, grp_ki in grp_code.groupby("ki", sort=False):
             c_grp_k = (
                 grp_ki.groupby("cust", as_index=False)
@@ -511,8 +593,15 @@ def build_sales_purchase_maps(sales_files_list, up_sales_bytes, up_sales_name, t
             for _, r in grp_sorted.head(50).iterrows()
         ]
 
-    src_info = f"売上データ連動済 ({len(df_all):,} 明細)"
-    return comp_map, det_map, src_info
+    src_info = f"yayoi_CSV {len(csv_file_metas)}ファイル連動済 ({len(df_all):,} 明細)"
+    return comp_map, det_map, src_info, len(csv_file_metas)
+
+def find_local_file(keywords, ext=".xlsx"):
+    for fn in os.listdir(SCRIPT_DIR):
+        if fn.lower().endswith(ext) and not fn.startswith("~$"):
+            if any(k in fn for k in keywords):
+                return os.path.join(SCRIPT_DIR, fn)
+    return None
 
 @st.cache_data
 def load_company_master(file_bytes_or_path):
@@ -990,7 +1079,7 @@ with head_col3:
         u_c3, u_c4 = st.columns(2)
         up_comp = u_c3.file_uploader("🏢 弥生会社名.xlsx", type=["xlsx"], key="up_comp")
         up_item = u_c4.file_uploader("📦 弥生商品番号.xlsx", type=["xlsx"], key="up_item")
-        up_sales = st.file_uploader("🔥 売上明細データ (CSV / Excel ※購入先内訳用・任意)", type=["csv", "xlsx"], key="up_sales")
+        up_sales = st.file_uploader("🔥 売上yayoi_CSV (手動追加用・任意)", type=["csv", "xlsx"], key="up_sales")
 
 gdrive_sync = sync_all_files_from_gdrive(gdrive_url_input, gdrive_kakuho_input)
 
@@ -1052,7 +1141,6 @@ if not df_yayoi.empty:
         if not maru_grp.empty:
             marufuji_dict[code_n] = maru_grp[["受注番号", "得意先名", "数量", "受注日", "納入期日", "倉庫名", "備考", "担当者名"]].to_dict(orient="records")
 
-        # 得意先別の受注確保ランキング（実績クリック時の参考表示にも利用）
         c_rank = grp.groupby("得意先名", as_index=False).agg(qty=("数量", "sum"), cnt=("受注番号", "count"), last_dt=("受注日", "max")).sort_values("qty", ascending=False)
         tot_q = c_rank["qty"].sum()
         yayoi_cust_rank_map[code_n] = [
@@ -1091,11 +1179,22 @@ for _, r in df_main.iterrows():
 target_norm_codes = tuple(sorted(df_main["品番_正規化"].unique()))
 up_sales_bytes = up_sales.getvalue() if up_sales is not None else None
 up_sales_name = up_sales.name if up_sales is not None else ""
-sales_comp_map, sales_det_map, sales_src_info = build_sales_purchase_maps(
-    gdrive_sync.get("sales_files", []), up_sales_bytes, up_sales_name, target_norm_codes
+
+# Googleドライブの『yayoi_XXXX.csv』から購入先データを自動構築
+sales_comp_map, sales_det_map, sales_src_info, yayoi_csv_cnt = fetch_and_build_yayoi_sales_from_gdrive(
+    up_sales_bytes, up_sales_name, target_norm_codes
 )
 
-df_main["関連会社検索用"] = df_main["品番_正規化"].map(yayoi_comp_search_map).fillna("")
+# 売上先の会社名でも検索できるように結合
+sales_comp_search_str_map = {}
+for c_n, ki_dict in sales_comp_map.items():
+    all_c_list = ki_dict.get("ALL", [])
+    sales_comp_search_str_map[c_n] = " ".join([x["得意先名"] for x in all_c_list])
+
+df_main["関連会社検索用"] = (
+    df_main["品番_正規化"].map(yayoi_comp_search_map).fillna("") + " " +
+    df_main["品番_正規化"].map(sales_comp_search_str_map).fillna("")
+)
 m_df = df_main.copy()
 
 unregistered_list = []
@@ -1135,8 +1234,8 @@ zure_count = int((m_df["確保数のズレ"] != 0).sum())
 st.caption(
     f"**{src_status}** ｜ 参照シート: **{loaded_sheet_name}** ({len(m_df):,} 品番) ｜ "
     f"📑 確保データ元: **{yayoi_src_label or '未検出'}** (全 **{len(df_yayoi):,}** 行) ｜ "
+    f"🔥 売上実績: **{sales_src_info or 'yayoi_CSV検索中(0件)'}** ｜ "
     f"⚖️ 確保ズレあり: **{zure_count}** 件 ｜ 🚨 要発注: **{int((m_df['発注検討フラグ'] < 0).sum())}** 件"
-    + (f" ｜ 🔥 {sales_src_info}" if sales_src_info else "")
 )
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
@@ -1277,13 +1376,13 @@ with tab1:
             </select>
         </div>
         <div class="filter-group">
-            <label class="filter-label">🔍 品番・商品名・会社名（確保先）・決定事項でリアルタイム検索</label>
+            <label class="filter-label">🔍 品番・商品名・会社名（購入先/確保先）・決定事項でリアルタイム検索</label>
             <input type="text" id="js-search-kw" class="filter-input" placeholder="文字を打つと0.01秒で絞り込みます（例: ABO-08PK / ライト / 丸藤 / トップ産業）" oninput="applyInstantFilter()">
         </div>
     </div>
 
     <div class="toolbar">
-        <div class="toolbar-info">表示件数: <span id="row-count">0</span> 件 ｜ 💡 「74〜77期実績」クリックで購入先内訳、「確保数のズレ」クリックでズレ原因＆全ズレ商品リストが開きます！</div>
+        <div class="toolbar-info">表示件数: <span id="row-count">0</span> 件 ｜ 💡 「74〜77期実績」クリックで購入先ランキング、「確保数のズレ」クリックでズレ原因＆全ズレ商品リストが開きます！</div>
         <button class="btn-download" onclick="exportEditedCSV()">📥 編集内容を反映したCSV出力</button>
     </div>
     <div class="table-wrap">
@@ -1571,7 +1670,6 @@ with tab1:
             document.getElementById("modal-input-dec").value = r["決定事項"] || "";
             document.getElementById("modal-input-odate").value = r["発注日"] || "";
 
-            // ① 実績（購入先ランキング）モード
             if (mode === 'sales') {{
                 const kiTitle = (currentKiFilter && currentKiFilter !== 'ALL') ? `${{currentKiFilter}}` : "全期間累計";
                 let kiBtnsHtml = `
@@ -1584,7 +1682,7 @@ with tab1:
                         <button class="stamp-btn" style="${{currentKiFilter==='77期'?'background:#1e40af;color:#fff;':''}}" onclick="openModal(${{idx}}, 'sales', '77期')">77期 (${{fmtNum(r['77期'])}}個)</button>
                     </div>
                 `;
-                document.getElementById("modal-sub-title").innerHTML = `🔥 【${{code}}】どこで購入されているか（得意先別 実績内訳：${{kiTitle}}）`;
+                document.getElementById("modal-sub-title").innerHTML = `🔥 【${{code}}】どこで購入されているか（得意先別 売上実績ランキング：${{kiTitle}}）`;
 
                 const codeSalesObj = salesCompMap[codeNorm] || {{}};
                 const compList = codeSalesObj[currentKiFilter] || codeSalesObj["ALL"] || [];
@@ -1625,7 +1723,7 @@ with tab1:
                 }} else {{
                     sHtml += `<div class="diag-box" style="background:#f8fafc; border:1px solid #cbd5e1; color:#334155;">
                         <b>📊 期別 出荷実績サマリー</b>： 74期: <b>${{fmtNum(r["74期"])}}</b> 個 ／ 75期: <b>${{fmtNum(r["75期"])}}</b> 個 ／ 76期: <b>${{fmtNum(r["76期"])}}</b> 個 ／ 77期(今期): <b style="color:#ea580c;">${{fmtNum(r["77期"])}}</b> 個<br>
-                        <span style="font-size:12.5px; color:#64748b;">※過去の全売上明細ファイル（CSV/Excel）をGoogleドライブに入れるか、画面右上の「📂手動アップロード」の『🔥売上明細データ』にアップすると、過去すべての購入先ランキングが表示されます。</span>
+                        <span style="font-size:12.5px; color:#64748b;">※この商品の『yayoi_XXXX.csv』明細がまだ見つからないか、Googleドライブの『売上ダッシュボード > 済』フォルダがサービスアカウント（id-840@asahi-dashboard-514301.iam.gserviceaccount.com）に共有されていない可能性があります。</span>
                     </div>`;
 
                     if (yayoiRankList.length > 0) {{
@@ -1642,13 +1740,10 @@ with tab1:
                             </tr>`;
                         }});
                         sHtml += `</tbody></table>`;
-                    }} else {{
-                        sHtml += `<div style="padding:14px; color:#64748b;">現在この商品の弥生確保データはありません。</div>`;
                     }}
                 }}
                 document.getElementById("modal-yayoi-area").innerHTML = sHtml;
             }}
-            // ② 確保数のズレ診断 ＆ 全ズレ商品一覧モード
             else if (mode === 'zure') {{
                 document.getElementById("modal-sub-title").innerHTML = `⚖️ 【${{code}}】確保数のズレ原因診断 ＆ 全ズレ商品リスト`;
                 const rojiSec = Number(r["確保数_ロジザード"] || 0);
@@ -1668,7 +1763,7 @@ with tab1:
                         <b>🚨 弥生確保の方が 【${{fmtNum(Math.abs(zure))}} 個】 多い状態です（ズレ: ${{fmtNum(zure)}}）</b><br>
                         ・ロジザード側の確保数: <b>${{fmtNum(rojiSec)}}</b> 個<br>
                         ・弥生販売側の確保合計: <b>${{fmtNum(totalYayoi)}}</b> 個 （一般: <b>${{fmtNum(yayoiSec)}}</b> 個 ／ 丸藤: <b>${{fmtNum(maruSec)}}</b> 個）<br>
-                        👉 <b>主な原因</b>：弥生販売で受注伝票（確保）を登録したあと、<b>ロジザード側で確保在庫への移動（引当）がまだ行われていない</b>か、2027年等の先行受注分をロジザード側でまだ確保枠に移していない可能性があります。下の弥生伝票明細を確認してください。
+                        👉 <b>主な原因</b>：弥生販売で受注伝票（確保）を登録したあと、<b>ロジザード側で確保在庫への移動（引当）がまだ行われていない</b>か、2027年等の先行受注分をロジザード側でまだ確保枠に移していない可能性があります。
                     </div>`;
                 }} else {{
                     diagHtml = `<div class="diag-box" style="background:#fffbeb; border:2px solid #fcd34d; color:#92400e;">
@@ -1679,7 +1774,6 @@ with tab1:
                     </div>`;
                 }}
 
-                // この商品の弥生確保明細
                 const thisYayoiList = yayoiMap[codeNorm] || [];
                 if (thisYayoiList.length > 0) {{
                     diagHtml += `<div class="sec-title">📋 この商品（${{code}}）の弥生確保 登録明細（全 ${{thisYayoiList.length}} 件）</div>`;
@@ -1698,7 +1792,6 @@ with tab1:
                     diagHtml += `</tbody></table>`;
                 }}
 
-                // 全商品のうちズレが発生している商品一覧
                 const allZureRows = tableData.filter(item => Number(item["確保数のズレ"] || 0) !== 0)
                     .sort((a, b) => Math.abs(Number(b["確保数のズレ"])) - Math.abs(Number(a["確保数のズレ"])));
 
@@ -1732,7 +1825,6 @@ with tab1:
                 diagHtml += `</tbody></table>`;
                 document.getElementById("modal-yayoi-area").innerHTML = diagHtml;
             }}
-            // ③ 弥生確保 / 丸藤確保リストモード
             else {{
                 let targetList = [];
                 if (mode === 'marufuji') {{
