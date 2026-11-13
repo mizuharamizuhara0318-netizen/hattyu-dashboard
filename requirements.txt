@@ -1,5 +1,6 @@
 streamlit
 pandas
 openpyxl
+supabase
 google-api-python-client
 google-auth
