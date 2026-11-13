@@ -2228,7 +2228,7 @@ with tab1:
                 document.getElementById("modal-sub-title").innerHTML = `💴 【${{code}}】会社ごとの販売価格一覧（order_r『加盟店価格』シート参照：全 ${{kCount}} 件）`;
                 document.getElementById("modal-yayoi-area").innerHTML = buildKameiPriceTableHtml(codeNorm, unitCost, minGedai);
             }}
-            // モードB：売上実績・購入先内訳モード（会社ごとの加盟店価格も並べて表示！）
+// モードB：売上実績・購入先内訳モード（原価・利益額・利益率・合計行つき！）
             else if (mode === 'sales') {{
                 let kiTitle = currentKiFilter;
                 if (currentKiFilter === 'THIS_WEEK') kiTitle = thisWeekLabel;
@@ -2248,7 +2248,7 @@ with tab1:
                         <button class="stamp-btn" style="${{currentKiFilter==='ALL'?'background:#047857;color:#fff;':''}}" onclick="openModal(${{idx}}, 'sales', 'ALL')">💰 全期間累計</button>
                     </div>
                 `;
-                document.getElementById("modal-sub-title").innerHTML = `🔥 【${{code}}】どこで売れたか（得意先別 売上・粗利・加盟店販売価格：${{kiTitle}}）`;
+                document.getElementById("modal-sub-title").innerHTML = `🔥 【${{code}}】どこで売れたか（得意先別 売上・原価・利益額・利益率：${{kiTitle}}）`;
 
                 const codeSalesObj = salesCompMap[codeNorm] || {{}};
                 const compList = codeSalesObj[currentKiFilter] || [];
@@ -2256,37 +2256,74 @@ with tab1:
 
                 let sHtml = kiBtnsHtml;
                 if (compList.length > 0) {{
+                    let sumQty = 0, sumSales = 0, sumCost = 0, sumProfit = 0, sumCnt = 0;
+
                     sHtml += `<table class="sub-table"><thead><tr>
-                        <th style="width:45px;">順位</th>
+                        <th style="width:42px;">順位</th>
                         <th>購入先（得意先名）</th>
-                        <th style="width:105px;">購入数量</th>
-                        <th style="width:75px;">構成比</th>
-                        <th style="width:125px; background:#fef3c7; color:#b45309;">販売価格(加盟店価格)</th>
-                        <th style="width:115px;">売上金額</th>
-                        <th style="width:115px;">粗利額(新原価計算)</th>
-                        <th style="width:75px;">伝票数</th>
-                        <th style="width:105px;">最終売上日</th>
+                        <th style="width:90px;">購入数量</th>
+                        <th style="width:68px;">構成比</th>
+                        <th style="width:115px; background:#fef3c7; color:#b45309;">販売価格<br>(加盟店価格)</th>
+                        <th style="width:115px; background:#e0f2fe; color:#0369a1;">原価<br>(1個 / 原価計)</th>
+                        <th style="width:105px;">売上金額</th>
+                        <th style="width:125px; background:#dcfce7; color:#047857;">利益額<br>(合計 / 1個利益)</th>
+                        <th style="width:80px; background:#dcfce7; color:#047857;">利益率</th>
+                        <th style="width:68px;">伝票数</th>
+                        <th style="width:100px;">最終売上日</th>
                     </tr></thead><tbody>`;
+
                     compList.forEach((c, cIdx) => {{
                         const cQty = Number(c["数量"] || 0);
                         const kPrice = findCompanyKameiPrice(codeNorm, c["得意先名"]);
                         const fallbackUnitP = kPrice || Number(r["平均単価"] || minGedai || 0);
                         const rawAmt = Number(c["金額"] || 0);
                         const cAmt = (rawAmt >= cQty * unitCost && rawAmt > 0) ? rawAmt : Math.round(cQty * fallbackUnitP);
-                        const dispUnitP = kPrice ? `¥${{fmtNum(kPrice)}} (登録値)` : (cQty > 0 ? `¥${{fmtNum(Math.round(cAmt / cQty))}} (実売/下代)` : "—");
-                        const cProf = (cAmt > 0 && unitCost > 0) ? Math.max(0, Math.round(cAmt - (cQty * unitCost))) : 0;
+                        const effUnitP = cQty > 0 ? Math.round(cAmt / cQty) : fallbackUnitP;
+                        const dispUnitP = kPrice ? `¥${{fmtNum(kPrice)}} <span style="font-size:11px;color:#78350f;">(登録値)</span>` : `¥${{fmtNum(effUnitP)}}`;
+
+                        const cCostTotal = Math.round(cQty * unitCost);
+                        const unitProf = effUnitP - unitCost;
+                        const cProf = (cAmt > 0 && unitCost > 0) ? Math.max(0, Math.round(cAmt - cCostTotal)) : 0;
+                        const cMargin = (cAmt > 0) ? ((cProf / cAmt) * 100).toFixed(1) + "%" : "0.0%";
+
+                        sumQty += cQty;
+                        sumSales += cAmt;
+                        sumCost += cCostTotal;
+                        sumProfit += cProf;
+                        sumCnt += Number(c["伝票回数"] || 0);
+
                         sHtml += `<tr>
                             <td style="text-align:center; font-weight:bold;">${{cIdx + 1}}</td>
                             <td style="font-weight:bold; color:#1e293b;">${{c["得意先名"]}}</td>
-                            <td style="text-align:right; font-weight:bold; color:#ea580c; background:#fff7ed; font-size:15.5px;">${{fmtNum(cQty)}} 個</td>
+                            <td style="text-align:right; font-weight:bold; color:#ea580c; background:#fff7ed; font-size:15px;">${{fmtNum(cQty)}} 個</td>
                             <td style="text-align:right; font-weight:bold;">${{c["構成比"]}}</td>
                             <td style="text-align:right; font-weight:bold; color:#b45309; background:#fffbeb;">${{dispUnitP}}</td>
-                            <td style="text-align:right;">¥${{fmtNum(cAmt)}}</td>
-                            <td style="text-align:right; font-weight:bold; color:#047857; background:#ecfdf5;">¥${{fmtNum(cProf)}}</td>
+                            <td style="text-align:right; background:#f0f9ff; color:#0369a1; font-weight:bold;">
+                                ¥${{fmtNum(unitCost)}}<br><span style="font-size:11px; color:#64748b; font-weight:normal;">(計 ¥${{fmtNum(cCostTotal)}})</span>
+                            </td>
+                            <td style="text-align:right; font-weight:bold;">¥${{fmtNum(cAmt)}}</td>
+                            <td style="text-align:right; font-weight:bold; color:#047857; background:#ecfdf5; font-size:15px;">
+                                ¥${{fmtNum(cProf)}}<br><span style="font-size:11px; color:#065f46; font-weight:normal;">(1個 +¥${{fmtNum(unitProf)}})</span>
+                            </td>
+                            <td style="text-align:right; font-weight:bold; color:#047857; background:#d1fae5; font-size:15px;">${{cMargin}}</td>
                             <td style="text-align:center;">${{fmtNum(c["伝票回数"])}} 回</td>
                             <td style="text-align:center;">${{c["最終売上日"]}}</td>
                         </tr>`;
                     }});
+
+                    const totMargin = (sumSales > 0) ? ((sumProfit / sumSales) * 100).toFixed(1) + "%" : "0.0%";
+                    sHtml += `<tr style="background:#f1f5f9; border-top:2px solid #475569; font-weight:bold;">
+                        <td colspan="2" style="text-align:center; color:#0f172a;">合計（${{compList.length}} 社）</td>
+                        <td style="text-align:right; color:#ea580c; font-size:15px;">${{fmtNum(sumQty)}} 個</td>
+                        <td style="text-align:right;">100%</td>
+                        <td style="text-align:center;">—</td>
+                        <td style="text-align:right; color:#0369a1;">計 ¥${{fmtNum(sumCost)}}</td>
+                        <td style="text-align:right; font-size:15px;">¥${{fmtNum(sumSales)}}</td>
+                        <td style="text-align:right; color:#047857; font-size:15.5px; background:#bbf7d0;">¥${{fmtNum(sumProfit)}}</td>
+                        <td style="text-align:right; color:#047857; font-size:15.5px; background:#bbf7d0;">${{totMargin}}</td>
+                        <td style="text-align:center;">${{fmtNum(sumCnt)}} 回</td>
+                        <td style="text-align:center;">—</td>
+                    </tr>`;
                     sHtml += `</tbody></table>`;
                 }} else {{
                     sHtml += `<div class="diag-box" style="background:#f8fafc; border:1px solid #cbd5e1; color:#334155;">
@@ -2295,21 +2332,43 @@ with tab1:
                     </div>`;
                 }}
 
-                // 下段に常時「会社ごとの販売価格（order_r 加盟店価格）」一覧も併設表示
                 const kCount = (kameiPriceMap[codeNorm] || []).length;
                 sHtml += `<div class="sec-title" style="margin-top:18px;">💴 この商品の『会社ごとの販売価格（order_r 加盟店価格シート）』登録一覧（全 ${{kCount}} 件）</div>`;
                 sHtml += buildKameiPriceTableHtml(codeNorm, unitCost, minGedai);
 
                 if (detList.length > 0) {{
                     sHtml += `<div class="sec-title" style="margin-top:18px;">📄 売上伝票明細（最新60件）</div>`;
-                    sHtml += `<table class="sub-table"><thead><tr><th style="width:95px;">期間区分</th><th style="width:110px;">売上日</th><th>得意先名</th><th style="width:95px;">数量</th><th style="width:115px;">売上金額</th><th style="width:90px;">担当者</th></tr></thead><tbody>`;
+                    sHtml += `<table class="sub-table"><thead><tr>
+                        <th style="width:90px;">期間区分</th>
+                        <th style="width:105px;">売上日</th>
+                        <th>得意先名</th>
+                        <th style="width:85px;">数量</th>
+                        <th style="width:95px;">販売単価</th>
+                        <th style="width:95px;">原価(1個)</th>
+                        <th style="width:110px;">売上金額</th>
+                        <th style="width:110px;">利益額</th>
+                        <th style="width:80px;">利益率</th>
+                        <th style="width:80px;">担当者</th>
+                    </tr></thead><tbody>`;
                     detList.forEach(d => {{
+                        const dQty = Number(d["数量"] || 0);
+                        const kp = findCompanyKameiPrice(codeNorm, d["得意先名"]);
+                        const fbP = kp || Number(r["平均単価"] || minGedai || 0);
+                        const rawDAmt = Number(d["金額"] || 0);
+                        const dAmt = (rawDAmt >= dQty * unitCost && rawDAmt > 0) ? rawDAmt : Math.round(dQty * fbP);
+                        const dUnitP = dQty > 0 ? Math.round(dAmt / dQty) : fbP;
+                        const dProf = Math.max(0, Math.round(dAmt - (dQty * unitCost)));
+                        const dMar = dAmt > 0 ? ((dProf / dAmt) * 100).toFixed(1) + "%" : "0.0%";
                         sHtml += `<tr>
                             <td style="text-align:center; font-weight:bold;">${{d["期"]}}</td>
                             <td style="text-align:center; font-weight:bold;">${{d["日付"]}}</td>
                             <td style="font-weight:bold;">${{d["得意先名"]}}</td>
-                            <td style="text-align:right; font-weight:bold; color:#0284c7;">${{fmtNum(d["数量"])}}</td>
-                            <td style="text-align:right;">¥${{fmtNum(d["金額"])}}</td>
+                            <td style="text-align:right; font-weight:bold; color:#0284c7;">${{fmtNum(dQty)}}</td>
+                            <td style="text-align:right;">¥${{fmtNum(dUnitP)}}</td>
+                            <td style="text-align:right; color:#0369a1;">¥${{fmtNum(unitCost)}}</td>
+                            <td style="text-align:right; font-weight:bold;">¥${{fmtNum(dAmt)}}</td>
+                            <td style="text-align:right; font-weight:bold; color:#047857; background:#ecfdf5;">¥${{fmtNum(dProf)}}</td>
+                            <td style="text-align:right; font-weight:bold; color:#047857;">${{dMar}}</td>
                             <td style="text-align:center;">${{d["担当者"]}}</td>
                         </tr>`;
                     }});
