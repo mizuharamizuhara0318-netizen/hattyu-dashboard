@@ -635,7 +635,7 @@ def parse_yayoi_sales_csv(fname: str, raw_bytes: bytes, mtime_str: str = "") -> 
                     return orig_c
         return None
 
-    c_code = f_col(["商品コード", "品番", "型番", "商品番号", "商品の코드", "code"])
+    c_code = f_col(["商品コード", "品番", "型番", "商品番号", "code"])
     c_cust = f_col(["得意先名称", "得意先名", "会社名", "販売先", "顧客名", "得意先略称", "出荷先名", "cust"])
     c_qty = f_col(["数量", "売上数", "出荷数", "個数", "バラ数", "受注数", "qty"])
     c_price = f_col(["単価", "売上単価", "納入単価", "税抜単価", "販売単価", "売単価", "price"])
@@ -643,92 +643,110 @@ def parse_yayoi_sales_csv(fname: str, raw_bytes: bytes, mtime_str: str = "") -> 
     c_dt = f_col(["売上日", "出荷日", "伝票日付", "日付", "受注日", "date"])
     c_stf = f_col(["担当者名", "担当者", "入力者", "staff"])
 
-    # 1行目が見出しではなくデータ行（ヘッダーなし弥生CSV）だった場合、または単価・金額列が特定できない場合の自動検出
+    # 見出しなし弥生CSV（または単価・金額列が見出しから特定できない場合）の高精度列検出
     if c_code is None or c_qty is None or (c_price is None and c_amt is None):
-        first_row_vals = [clean_str(x) for x in df.columns]
-        has_code_in_header = any(re.match(r'^[A-Z]{2,4}-[0-9A-Z-]+$', v.upper()) for v in first_row_vals)
-        if has_code_in_header or c_code is None:
-            for enc in ["cp932", "shift_jis", "utf-8-sig", "utf-8"]:
-                try:
-                    df_nohead = pd.read_csv(io.BytesIO(raw_bytes), encoding=enc, header=None, low_memory=False)
-                    if not df_nohead.empty and len(df_nohead.columns) >= 4:
+        for enc in ["cp932", "shift_jis", "utf-8-sig", "utf-8"]:
+            try:
+                df_nohead = pd.read_csv(io.BytesIO(raw_bytes), encoding=enc, header=None, low_memory=False)
+                if not df_nohead.empty and len(df_nohead.columns) >= 4:
+                    # 1行目に「商品コード」「数量」などの文字が含まれていれば1行目を見出し行にする
+                    r0_vals = [clean_str(x) for x in df_nohead.iloc[0].values]
+                    if any(k in r0_vals for k in ["商品コード", "品番", "型番", "数量", "売上金額", "金額"]):
+                        df_nohead.columns = r0_vals
+                        df = df_nohead.iloc[1:].reset_index(drop=True)
+                    else:
                         df = df_nohead
-                        break
-                except Exception:
-                    continue
+                    break
+            except Exception:
+                continue
 
-        # 複数行をスキャンして「型番列」「日付列」「数量×単価＝金額 となる3列」を自動特定！
-        code_col_idx = None
-        date_col_idx = None
-        qty_col_idx = None
-        price_col_idx = None
-        amt_col_idx = None
+        if df.empty:
+            return pd.DataFrame()
 
-        for r_i in range(min(15, len(df))):
+        # 最大40行をスキャンして「型番列」「日付列」「数量×単価＝金額 となる本物の3列」を多数決で特定する
+        code_votes = {}
+        date_votes = {}
+        triple_votes = {}
+
+        scan_len = min(40, len(df))
+        for r_i in range(scan_len):
             row_v = [clean_str(x) for x in df.iloc[r_i].values]
-            if code_col_idx is None:
-                for idx_c, val in enumerate(row_v):
-                    if re.match(r'^[A-Z]{2,4}-[0-9A-Z-]+$', val.upper()):
-                        code_col_idx = idx_c
-                        break
-            if date_col_idx is None:
-                for idx_c, val in enumerate(row_v):
-                    if re.match(r'^(?:202[0-9]|R\d|令和\d)[-/\s年.]?[01]?[0-9][-/\s月.]?[0-3]?[0-9]', val):
-                        date_col_idx = idx_c
-                        break
-            if code_col_idx is not None and qty_col_idx is None:
-                # 型番列より右側にある数値列を抽出し、数量(q) * 単価(p) == 金額(a) が成り立つ列セットを探す
+            row_code_idx = None
+            for idx_c, val in enumerate(row_v):
+                # 型番パターン (例: ABO-2907, APL-4312SPK, 414210122)
+                if re.match(r'^[A-Z]{2,4}-[0-9A-Z\-]+$', val.upper()):
+                    code_votes[idx_c] = code_votes.get(idx_c, 0) + 1
+                    if row_code_idx is None:
+                        row_code_idx = idx_c
+                # 日付パターン (例: 20260803, 2026/08/03, 2026-08-03)
+                if re.match(r'^(?:202[0-9]|R\d|令和\d)[-/\s年.]?[01]?[0-9][-/\s月.]?[0-3]?[0-9]', val):
+                    date_votes[idx_c] = date_votes.get(idx_c, 0) + 1
+
+            if row_code_idx is not None:
+                # 型番列より右側にあるすべての数値列を取り出す
                 nums = []
-                for idx_c in range(code_col_idx + 1, len(row_v)):
+                for idx_c in range(row_code_idx + 1, len(row_v)):
                     v_str = row_v[idx_c].replace(",", "").replace("¥", "").replace("円", "").strip()
                     if v_str and re.match(r'^-?\d+(\.\d+)?$', v_str):
                         nums.append((idx_c, float(v_str)))
+
+                # 「数量(vq) × 単価(vp) ＝ 金額(va)」が成立し、かつフラグ列(1や0)ではない本物の価格ペアを探す
                 for i_n in range(len(nums)):
                     iq, vq = nums[i_n]
                     if vq <= 0:
                         continue
                     for j_n in range(i_n + 1, len(nums)):
                         ip, vp = nums[j_n]
-                        if vp <= 0:
+                        if vp < 10:  # 単価10円未満（課税フラグの1や0など）は絶対に単価として採用しない！
                             continue
                         for k_n in range(j_n + 1, len(nums)):
                             ia, va = nums[k_n]
-                            if va > 0 and abs(vq * vp - va) <= max(1.0, va * 0.01) and (vp >= 5 or va >= 10):
-                                qty_col_idx, price_col_idx, amt_col_idx = iq, ip, ia
-                                break
-                        if qty_col_idx is not None:
-                            break
-                    if qty_col_idx is not None:
-                        break
+                            if va >= 10 and abs(vq * vp - va) <= max(2.0, va * 0.01):
+                                t_key = (iq, ip, ia)
+                                triple_votes[t_key] = triple_votes.get(t_key, 0) + 1
 
-        if code_col_idx is not None and c_code is None:
-            c_code = df.columns[code_col_idx]
-        if date_col_idx is not None and c_dt is None:
-            c_dt = df.columns[date_col_idx]
-        if c_cust is None and code_col_idx is not None:
-            # 型番列より左側にある日本語文字列の列を得意先名として自動選択
-            for idx_c in range(code_col_idx - 1, -1, -1):
-                sample_txt = clean_str(df.iloc[0, idx_c])
-                if len(sample_txt) >= 2 and not sample_txt.replace("-", "").replace("/", "").isdigit():
-                    c_cust = df.columns[idx_c]
-                    break
-        if qty_col_idx is not None:
-            if c_qty is None: c_qty = df.columns[qty_col_idx]
-            if c_price is None: c_price = df.columns[price_col_idx]
-            if c_amt is None: c_amt = df.columns[amt_col_idx]
-        elif code_col_idx is not None and c_qty is None:
-            # 万が一3列セットが見つからない場合のフォールバック
-            num_cols = []
-            for idx_c in range(code_col_idx + 1, len(df.columns)):
-                v_test = clean_str(df.iloc[0, idx_c]).replace(",", "")
-                if v_test and re.match(r'^-?\d+(\.\d+)?$', v_test):
-                    num_cols.append(df.columns[idx_c])
-            if len(num_cols) >= 3:
-                c_qty, c_price, c_amt = num_cols[0], num_cols[1], num_cols[2]
-            elif len(num_cols) == 2:
-                c_qty, c_price = num_cols[0], num_cols[1]
-            elif len(num_cols) == 1:
-                c_qty = num_cols[0]
+        best_code_idx = max(code_votes, key=code_votes.get) if code_votes else None
+        best_date_idx = max(date_votes, key=date_votes.get) if date_votes else None
+
+        if best_code_idx is not None and c_code is None:
+            c_code = df.columns[best_code_idx]
+        if best_date_idx is not None and c_dt is None:
+            c_dt = df.columns[best_date_idx]
+
+        # 得意先名列の特定（型番列より左側で、日本語名が入っている列）
+        if c_cust is None and best_code_idx is not None:
+            cust_votes = {}
+            for r_i in range(min(20, len(df))):
+                for idx_c in range(best_code_idx - 1, -1, -1):
+                    val = clean_str(df.iloc[r_i, idx_c])
+                    if len(val) >= 2 and not re.match(r'^[0-9\-/:.\s]+$', val):
+                        cust_votes[idx_c] = cust_votes.get(idx_c, 0) + 1
+                        break
+            if cust_votes:
+                c_cust = df.columns[max(cust_votes, key=cust_votes.get)]
+
+        if triple_votes:
+            best_q_idx, best_p_idx, best_a_idx = max(triple_votes, key=triple_votes.get)
+            if c_qty is None: c_qty = df.columns[best_q_idx]
+            if c_price is None: c_price = df.columns[best_p_idx]
+            if c_amt is None: c_amt = df.columns[best_a_idx]
+        elif best_code_idx is not None:
+            # 万が一「数量×単価＝金額」の3列セットが無く「数量」と「単価(または金額)」の2列だけの場合
+            # 各列の中央値・最大値を見て、フラグ列（最大値が10以下の列）を除外して選ぶ
+            cand_cols = []
+            for idx_c in range(best_code_idx + 1, len(df.columns)):
+                col_nums = pd.to_numeric(df.iloc[:, idx_c].astype(str).str.replace(",", ""), errors="coerce").dropna()
+                if not col_nums.empty and col_nums.max() > 15:
+                    cand_cols.append((idx_c, col_nums.median(), col_nums.max()))
+            if len(cand_cols) >= 3:
+                c_qty = df.columns[cand_cols[0][0]]
+                c_price = df.columns[cand_cols[1][0]]
+                c_amt = df.columns[cand_cols[2][0]]
+            elif len(cand_cols) == 2:
+                c_qty = df.columns[cand_cols[0][0]]
+                c_price = df.columns[cand_cols[1][0]]
+            elif len(cand_cols) == 1:
+                c_qty = df.columns[cand_cols[0][0]]
 
     if c_code is None or c_qty is None:
         return pd.DataFrame()
@@ -741,10 +759,10 @@ def parse_yayoi_sales_csv(fname: str, raw_bytes: bytes, mtime_str: str = "") -> 
     raw_amt = df[c_amt].apply(to_num) if c_amt is not None else pd.Series([0.0] * len(df))
     calc_amt = out["qty"] * out["price"]
 
-    # 金額列があればそれを使い、もし金額列が0で単価列がある場合は「数量×単価」で金額を算出
+    # 金額列がフラグ列(1など)や未計算の場合は、必ず「数量 × 単価」で正しい売上金額を算出する
     out["amount"] = [
-        ra if (ra > 0 and not (q > 1 and abs(ra - p) < 1 and ca > ra)) else ca
-        for ra, ca, q, p in zip(raw_amt, calc_amt, out["qty"], out["price"])
+        ca if (ca > 0 and (ra <= 10 or abs(ra - ca) > 5)) else (ra if ra > 10 else ca)
+        for ra, ca in zip(raw_amt, calc_amt)
     ]
     out["staff"] = df[c_stf].apply(clean_str) if c_stf is not None else ""
 
