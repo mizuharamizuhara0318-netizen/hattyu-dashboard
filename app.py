@@ -1571,28 +1571,24 @@ for _, r in df_main.iterrows():
     else:
         u_gedai = round(u_cost / 0.65, 0) if u_cost > 0 else 0.0
 
-    # ② 今期（26/7〜）の売上数量と売上金額のみを使用！
+    # ② 今期（26/7〜）の売上数量と売上金額のみを使用（300円などの特価販売もCSVの実売単価をそのまま採用！）
     konki_q = int(r["今期出荷"])
     k77_q = int(r["77期"])
     csv_amt = float(konki_amt_map.get(cn, 0.0))
     csv_unit_p = (csv_amt / konki_q) if (konki_q > 0 and csv_amt > 0) else 0.0
 
-    # 今期の実売平均単価（CSVの金額が原価以上なら実売単価、もしCSVに単価が入っていない・原価割れならorder_rの下代で補完）
-    if csv_unit_p > u_cost and u_cost > 0:
+    if csv_unit_p > 0:
         u_avg_p = csv_unit_p
-    elif u_gedai > u_cost and u_cost > 0:
+    elif u_gedai > 0:
         u_avg_p = u_gedai
-    elif u_cost > 0:
-        u_avg_p = round(u_cost / 0.65, 0)
     else:
-        u_avg_p = csv_unit_p if csv_unit_p > 0 else u_gedai
+        u_avg_p = round(u_cost / 0.65, 0) if u_cost > 0 else 0.0
 
-    # ③ 今期の売上高・今期の粗利額・今期の粗利率を算出（今期売れていない商品はすべて 0 にする）
+    # ③ 今期の売上高・粗利額・粗利率を算出（CSVに実売金額があれば100%その金額を使用）
     if konki_q > 0 and u_avg_p > 0:
-        # CSVの実売合計金額が原価合計を超えていればそのまま使用、不足していれば個数×単価で算出
-        s_amt = int(round(csv_amt)) if (csv_amt >= konki_q * u_cost and csv_amt > 0) else int(round(konki_q * u_avg_p))
+        s_amt = int(round(csv_amt)) if csv_amt > 0 else int(round(konki_q * u_avg_p))
         cost_total = int(round(konki_q * u_cost)) if u_cost > 0 else int(round(s_amt * 0.65))
-        g_profit = max(0, s_amt - cost_total)
+        g_profit = s_amt - cost_total
         m_rate = round((g_profit / s_amt) * 100, 1) if s_amt > 0 else 0.0
     else:
         s_amt = 0
@@ -2351,9 +2347,12 @@ with tab1:
                         const kPrice = findCompanyKameiPrice(codeNorm, c["得意先名"]);
                         const fallbackUnitP = kPrice || Number(r["平均単価"] || minGedai || 0);
                         const rawAmt = Number(c["金額"] || 0);
-                        const cAmt = (rawAmt >= cQty * unitCost && rawAmt > 0) ? rawAmt : Math.round(cQty * fallbackUnitP);
-                        const effUnitP = cQty > 0 ? Math.round(cAmt / cQty) : fallbackUnitP;
-                        const dispUnitP = kPrice ? `¥${{fmtNum(kPrice)}} <span style="font-size:11px;color:#78350f;">(登録値)</span>` : `¥${{fmtNum(effUnitP)}}`;
+                        // ★ CSVに売上金額(rawAmt)があれば、原価より安い特価(300円など)でも書き換えずにそのまま採用！
+                        const cAmt = (rawAmt > 0) ? rawAmt : Math.round(cQty * fallbackUnitP);
+                        const effUnitP = (cQty > 0 && cAmt > 0) ? Math.round(cAmt / cQty) : fallbackUnitP;
+                        const dispUnitP = (kPrice && kPrice !== effUnitP)
+                            ? `¥${{fmtNum(effUnitP)}} <br><span style="font-size:10.5px;color:#78350f;">(加盟店登録:¥${{fmtNum(kPrice)}})</span>`
+                            : (kPrice ? `¥${{fmtNum(effUnitP)}} <span style="font-size:10.5px;color:#78350f;">(登録値)</span>` : `¥${{fmtNum(effUnitP)}} <span style="font-size:10.5px;color:#64748b;">(実売)</span>`);
 
                         const cCostTotal = Math.round(cQty * unitCost);
                         const unitProf = effUnitP - unitCost;
@@ -2429,9 +2428,9 @@ with tab1:
                         const kp = findCompanyKameiPrice(codeNorm, d["得意先名"]);
                         const fbP = kp || Number(r["平均単価"] || minGedai || 0);
                         const rawDAmt = Number(d["金額"] || 0);
-                        const dAmt = (rawDAmt >= dQty * unitCost && rawDAmt > 0) ? rawDAmt : Math.round(dQty * fbP);
+                        const dAmt = (rawDAmt > 0) ? rawDAmt : Math.round(dQty * fbP);
                         const dUnitP = dQty > 0 ? Math.round(dAmt / dQty) : fbP;
-                        const dProf = Math.max(0, Math.round(dAmt - (dQty * unitCost)));
+                        const dProf = Math.round(dAmt - (dQty * unitCost));
                         const dMar = dAmt > 0 ? ((dProf / dAmt) * 100).toFixed(1) + "%" : "0.0%";
                         sHtml += `<tr>
                             <td style="text-align:center; font-weight:bold;">${{d["期"]}}</td>
