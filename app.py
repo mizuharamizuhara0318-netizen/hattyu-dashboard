@@ -1764,7 +1764,8 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 ])
 
 # ==============================================================================
-# 【パート 3 / 3】画面UI・先週vs今週クリックPOP・新原価＆粗利＆発注予定金額リアルタイム計算
+# 【パート 3 / 3】画面UI・100%弥生売上(yayoi_CSV)連動POP・ズレ診断・シミュレーター完全版
+# （※ with tab1: からファイルの最後までをこのコードで丸ごと上書きしてください）
 # ==============================================================================
 with tab1:
     center_list = sorted([x for x in m_df["商品センター"].unique() if x])
@@ -1774,7 +1775,6 @@ with tab1:
     yayoi_rank_json = json.dumps(yayoi_cust_rank_map, ensure_ascii=False)
     sales_comp_json = json.dumps(sales_comp_map, ensure_ascii=False)
     sales_det_json = json.dumps(sales_det_map, ensure_ascii=False)
-    kamei_json = json.dumps(kamei_price_map, ensure_ascii=False)
     hist_json = json.dumps(hist_dict, ensure_ascii=False)
     prev_title_html = prev_col_title.replace("(", "<br>(")
 
@@ -1896,7 +1896,7 @@ with tab1:
                 <option value="this_week_sold">📅 今週（直近7日間）売れた商品（売れ数順）</option>
                 <option value="surge">⚡ 【急増アラート】今週急激に売れている商品</option>
                 <option value="new_prod">🆕 【新商品】76期以降に登場した新商品の売れ行き</option>
-                <option value="profit_rank">💰 粗利額（利益貢献度）が高い順ランキング</option>
+                <option value="profit_rank">💰 今期粗利額（利益貢献度）が高い順ランキング</option>
                 <option value="dead_stock">❄️ 【滞留・過剰在庫】在庫が多く回転率が低い商品（在庫金額順）</option>
                 <option value="konki_sold">🔥 今期(26/7〜)に売れている商品（多い順）</option>
                 <option value="zure">⚖️ 確保数のズレがある商品のみ</option>
@@ -1920,7 +1920,7 @@ with tab1:
         <div class="toolbar-info">
             <span>表示: <b id="row-count">0</b> 件</span>
             <span class="kpi-pill">💰 決定事項の発注予定総額(新原価): <b id="planned-order-cost" style="color:#be123c; font-size:14px;">¥0</b></span>
-            <span style="font-size:12px; color:#475569;">💡 「先週/今週売数」「今期」「74〜77期」「粗利額」をクリックすると販売先POPが開きます！</span>
+            <span style="font-size:12px; color:#475569;">💡 「先週/今週売数」「今期」「74〜77期」「売上高・粗利額」をクリックすると販売先POPが開きます！</span>
         </div>
         <button class="btn-download" onclick="exportEditedCSV()">📥 編集内容を反映したCSV出力</button>
     </div>
@@ -1941,9 +1941,9 @@ with tab1:
                     <th class="w-num" style="background:#fef3c7;">先週売数<br><span style="color:#b45309; font-size:10px;">🔍前週7日</span></th>
                     <th class="w-num" style="background:#fde68a;">今週売数<br><span style="color:#b45309; font-size:10px;">🔍直近7日</span></th>
                     <th class="w-num" style="background:#ecfdf5;">新原価<br><span style="color:#047857; font-size:10px;">(order_r)</span></th>
-                    <th class="w-money" style="background:#ecfdf5;">売上高<br><span style="color:#047857; font-size:10px;">(税抜)</span></th>
-                    <th class="w-money" style="background:#d1fae5;">粗利額<br>(利益)<br><span style="color:#047857; font-size:10px;">🔍内訳</span></th>
-                    <th class="w-num" style="background:#ecfdf5;">粗利率</th>
+                    <th class="w-money" style="background:#ecfdf5;">今期売上高<br><span style="color:#047857; font-size:10px;">🔍内訳</span></th>
+                    <th class="w-money" style="background:#d1fae5;">今期粗利額<br>(利益)<br><span style="color:#047857; font-size:10px;">🔍内訳</span></th>
+                    <th class="w-num" style="background:#ecfdf5;">今期<br>粗利率</th>
                     <th class="w-num" style="background:#e0f2fe;">1課発注点<br><span style="color:#0369a1; font-size:10px;">✏️手動修正可</span></th>
                     <th class="w-num" style="background:#e0f2fe;">2課発注点<br><span style="color:#0369a1; font-size:10px;">✏️手動修正可</span></th>
                     <th class="w-num bg-cyan">在庫数<br><span class="red-txt">ロジザード</span></th>
@@ -1967,11 +1967,10 @@ with tab1:
 
     <div class="modal-overlay" id="detail-modal" onclick="closeModalOnBg(event)">
         <div class="modal-window">
-<div class="modal-header">
+            <div class="modal-header">
                 <div class="modal-title" id="modal-title-text">📦 品番詳細・内訳データ</div>
                 <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-                    <button class="mode-btn" id="btn-mode-sales" onclick="switchModalMode('sales', '今期(26/7〜)')">🔥 購入先（売上・粗利）内訳</button>
-                    <button class="mode-btn" id="btn-mode-kamei" onclick="switchModalMode('kamei', '')">💴 会社別の販売価格（加盟店価格）一覧</button>
+                    <button class="mode-btn" id="btn-mode-sales" onclick="switchModalMode('sales', '今期(26/7〜)')">🔥 購入先（弥生売上・原価・粗利）内訳</button>
                     <button class="mode-btn" id="btn-mode-zure" onclick="switchModalMode('zure', '')">⚖️ 確保ズレ診断＆全ズレ商品一覧</button>
                     <button class="mode-btn" id="btn-mode-yayoi" onclick="switchModalMode('yayoi', '')">🏢 弥生確保リスト（すべて）</button>
                     <button class="modal-close" onclick="closeModal()">✕ 閉じる</button>
@@ -2023,7 +2022,6 @@ with tab1:
         const yayoiRankMap = {yayoi_rank_json};
         const salesCompMap = {sales_comp_json};
         const salesDetMap = {sales_det_json};
-        const kameiPriceMap = {kamei_json};
         const histMap = {hist_json};
         const thisWeekLabel = "{this_w_label}";
         const prevWeekLabel = "{prev_w_label}";
@@ -2045,21 +2043,6 @@ with tab1:
             const s = String(val).trim();
             if (/^[0-9,.]+$/.test(s)) return "";
             return s;
-        }}
-
-        // 会社名から加盟店価格（order_r）を曖昧一致で検索するヘルパー関数
-        function findCompanyKameiPrice(codeNorm, targetCompName) {{
-            const kList = kameiPriceMap[codeNorm] || [];
-            if (!targetCompName || kList.length === 0) return null;
-            const cleanTarget = String(targetCompName).replace(/株式会社|有限会社|\(株\)|（株）|㈱|㈲|\s| /g, "");
-            if (!cleanTarget) return null;
-            for (const item of kList) {{
-                const cleanK = String(item["会社名"] || "").replace(/株式会社|有限会社|\(株\)|（株）|㈱|㈲|\s| /g, "");
-                if (cleanK && (cleanTarget.includes(cleanK) || cleanK.includes(cleanTarget))) {{
-                    return item["販売価格"];
-                }}
-            }}
-            return null;
         }}
 
         const savedEdits = JSON.parse(localStorage.getItem("hattyu_edits_v6") || "{{}}");
@@ -2205,7 +2188,7 @@ with tab1:
                     <td class="w-num ${{konkiCls}}"><span class="click-link-konki" onclick="openModal(${{idx}}, 'sales', '今期(26/7〜)')">${{konkiVal > 0 ? "🔥 " + fmtNum(konkiVal) : "0"}}</span></td>
                     <td class="w-num bg-hist-ki"><span class="click-link-ki" onclick="openModal(${{idx}}, 'sales', 'PREV_WEEK')">${{fmtNum(prevWVal)}}</span></td>
                     <td class="w-num ${{thisWCls}}"><span class="click-link-konki" onclick="openModal(${{idx}}, 'sales', 'THIS_WEEK')">${{thisWVal > 0 ? "⚡ " + fmtNum(thisWVal) : "0"}}</span></td>
-                    <td class="w-num" style="background:#f0fdf4; font-weight:bold;"><span class="click-link-profit" onclick="openModal(${{idx}}, 'kamei', '')">¥${{fmtNum(r["新原価"])}}</span></td>
+                    <td class="w-num" style="background:#f0fdf4; font-weight:bold;">¥${{fmtNum(r["新原価"])}}</td>
                     <td class="w-money" style="background:#f0fdf4;"><span class="click-link-profit" onclick="openModal(${{idx}}, 'sales', '今期(26/7〜)')">¥${{fmtNum(r["売上高"])}}</span></td>
                     <td class="w-money bg-profit"><span class="click-link-profit" onclick="openModal(${{idx}}, 'sales', '今期(26/7〜)')">¥${{fmtNum(r["粗利額"])}}</span></td>
                     <td class="w-num" style="background:#f0fdf4; font-weight:bold;"><span class="click-link-profit" onclick="openModal(${{idx}}, 'sales', '今期(26/7〜)')">${{r["粗利率"]}}%</span></td>
@@ -2252,48 +2235,6 @@ with tab1:
             openModal(currentModalIdx, mode, kiStr || "今期(26/7〜)");
         }}
 
-        // 会社別販売価格（加盟店価格）テーブルのHTMLを生成する共通関数
-        function buildKameiPriceTableHtml(codeNorm, unitCost, minGedai) {{
-            const kList = kameiPriceMap[codeNorm] || [];
-            if (kList.length === 0) {{
-                return `<div style="padding:14px; background:#f8fafc; color:#64748b; border:1px solid #cbd5e1; border-radius:6px;">
-                    この品番（${{codeNorm}}）は『order_r（マスター）.xlsx』の「加盟店価格」シートに個別登録がありません。（標準最低下代: ¥${{fmtNum(minGedai)}} ／ 商品原価: ¥${{fmtNum(unitCost)}}）
-                </div>`;
-            }}
-            let html = `<table class="sub-table"><thead><tr>
-                <th style="width:50px;">No</th>
-                <th>会社名（加盟店名 / ランク名）</th>
-                <th style="width:95px;">グループ連番</th>
-                <th style="width:80px;">ロット数</th>
-                <th style="width:130px; background:#fef3c7; color:#b45309;">販売価格(ロット単価)</th>
-                <th style="width:110px;">商品原価</th>
-                <th style="width:120px;">1個あたり粗利</th>
-                <th style="width:95px;">粗利率</th>
-                <th style="width:120px;">最低下代(¥${{fmtNum(minGedai)}})比</th>
-            </tr></thead><tbody>`;
-            kList.forEach((kp, idx) => {{
-                const sp = Number(kp["販売価格"] || 0);
-                const prof = sp - unitCost;
-                const mRate = (sp > 0 && unitCost > 0) ? ((prof / sp) * 100).toFixed(1) + "%" : "—";
-                const diffGedai = (minGedai > 0) ? (sp - minGedai) : 0;
-                const diffStr = (minGedai > 0) ? ((diffGedai >= 0 ? "+" : "") + fmtNum(diffGedai) + "円") : "—";
-                const diffColor = (diffGedai < 0) ? "color:#be123c; font-weight:bold;" : "color:#047857;";
-                html += `<tr>
-                    <td style="text-align:center;">${{idx + 1}}</td>
-                    <td style="font-weight:bold; color:#1e293b;">${{kp["会社名"]}}</td>
-                    <td style="text-align:center; color:#64748b;">${{kp["グループ"] || "—"}}</td>
-                    <td style="text-align:center;">${{fmtNum(kp["ロット数"])}}</td>
-                    <td style="text-align:right; font-weight:bold; color:#b45309; background:#fffbeb; font-size:15.5px;">¥${{fmtNum(sp)}}</td>
-                    <td style="text-align:right;">¥${{fmtNum(unitCost)}}</td>
-                    <td style="text-align:right; font-weight:bold; color:${{prof>=0?'#047857':'#be123c'}}; background:#ecfdf5;">¥${{fmtNum(prof)}}</td>
-                    <td style="text-align:right; font-weight:bold;">${{mRate}}</td>
-                    <td style="text-align:right; ${{diffColor}}">${{diffStr}}</td>
-                </tr>`;
-            }});
-            html += `</tbody></table>`;
-            return html;
-        }}
-
         function openModal(idx, mode, kiStr) {{
             currentModalIdx = idx;
             currentModalMode = mode;
@@ -2305,13 +2246,11 @@ with tab1:
             const minGedai = Number(r["最低下代"] || 0);
 
             document.getElementById("btn-mode-sales").className = (mode === 'sales') ? "mode-btn active" : "mode-btn";
-            document.getElementById("btn-mode-kamei").className = (mode === 'kamei') ? "mode-btn active" : "mode-btn";
             document.getElementById("btn-mode-zure").className = (mode === 'zure') ? "mode-btn active" : "mode-btn";
             document.getElementById("btn-mode-yayoi").className = (mode === 'yayoi') ? "mode-btn active" : "mode-btn";
 
             document.getElementById("modal-title-text").innerHTML = `📦 品番: 【${{code}}】 ${{r["商品区分"]}} ｜ ${{r["バッジ表示"]}} （拠点: ${{r["商品センター"]}}）`;
 
-            // ★ サマリーバーの一番目立つ位置に「商品原価（新原価）」と「最低下代」を常時表示！
             document.getElementById("modal-summary").innerHTML = `
                 <div class="summary-item" style="background:#dcfce7; padding:4px 12px; border-radius:6px; border:1px solid #86efac;">
                     💰 商品原価(新原価): <span style="color:#047857; font-size:19px;">¥${{fmtNum(unitCost)}}</span>
@@ -2329,71 +2268,148 @@ with tab1:
             document.getElementById("modal-input-dec").value = r["決定事項"] || "";
             document.getElementById("modal-input-odate").value = r["発注日"] || "";
 
-            // モードA：会社別の販売価格（加盟店価格）一覧モード
-            if (mode === 'kamei') {{
-                const kCount = (kameiPriceMap[codeNorm] || []).length;
-                document.getElementById("modal-sub-title").innerHTML = `💴 【${{code}}】会社ごとの販売価格一覧（order_r『加盟店価格』シート参照：全 ${{kCount}} 件）`;
-                document.getElementById("modal-yayoi-area").innerHTML = buildKameiPriceTableHtml(codeNorm, unitCost, minGedai);
+            // モードA：売上実績・購入先内訳モード（100% 弥生CSVの実売価格・原価・利益額・利益率を表示）
+            if (mode === 'sales') {{
+                let kiTitle = currentKiFilter;
+                if (currentKiFilter === 'THIS_WEEK') kiTitle = thisWeekLabel;
+                else if (currentKiFilter === 'PREV_WEEK') kiTitle = prevWeekLabel;
+                else if (currentKiFilter === 'ALL') kiTitle = "全期間累計";
+
+                let kiBtnsHtml = `
+                    <div style="display:flex; gap:8px; margin-bottom:12px; align-items:center; flex-wrap:wrap;">
+                        <span style="font-size:13px; font-weight:bold; color:#334155;">期間切替:</span>
+                        <button class="stamp-btn" style="${{currentKiFilter==='THIS_WEEK'?'background:#b45309;color:#fff;':''}}" onclick="openModal(${{idx}}, 'sales', 'THIS_WEEK')">⚡ ${{thisWeekLabel}} (${{fmtNum(r['今週売数'])}}個)</button>
+                        <button class="stamp-btn" style="${{currentKiFilter==='PREV_WEEK'?'background:#b45309;color:#fff;':''}}" onclick="openModal(${{idx}}, 'sales', 'PREV_WEEK')">📅 ${{prevWeekLabel}} (${{fmtNum(r['先週売数'])}}個)</button>
+                        <button class="stamp-btn" style="${{currentKiFilter==='今期(26/7〜)'?'background:#ea580c;color:#fff;':''}}" onclick="openModal(${{idx}}, 'sales', '今期(26/7〜)')">🔥 今期 26/7〜 (${{fmtNum(r['今期出荷'])}}個)</button>
+                        <button class="stamp-btn" style="${{currentKiFilter==='77期'?'background:#1e40af;color:#fff;':''}}" onclick="openModal(${{idx}}, 'sales', '77期')">77期 (${{fmtNum(r['77期'])}}個)</button>
+                        <button class="stamp-btn" style="${{currentKiFilter==='76期'?'background:#1e40af;color:#fff;':''}}" onclick="openModal(${{idx}}, 'sales', '76期')">76期 (${{fmtNum(r['76期'])}}個)</button>
+                        <button class="stamp-btn" style="${{currentKiFilter==='75期'?'background:#1e40af;color:#fff;':''}}" onclick="openModal(${{idx}}, 'sales', '75期')">75期 (${{fmtNum(r['75期'])}}個)</button>
+                        <button class="stamp-btn" style="${{currentKiFilter==='74期'?'background:#1e40af;color:#fff;':''}}" onclick="openModal(${{idx}}, 'sales', '74期')">74期 (${{fmtNum(r['74期'])}}個)</button>
+                        <button class="stamp-btn" style="${{currentKiFilter==='ALL'?'background:#047857;color:#fff;':''}}" onclick="openModal(${{idx}}, 'sales', 'ALL')">💰 全期間累計</button>
+                    </div>
+                `;
+                document.getElementById("modal-sub-title").innerHTML = `🔥 【${{code}}】どこで売れたか（弥生売上データ：販売価格・原価・利益額・利益率：${{kiTitle}}）`;
+
+                const codeSalesObj = salesCompMap[codeNorm] || {{}};
+                const compList = codeSalesObj[currentKiFilter] || [];
+                const detList = salesDetMap[codeNorm] || [];
+
+                let sHtml = kiBtnsHtml;
+                if (compList.length > 0) {{
+                    let sumQty = 0, sumSales = 0, sumCost = 0, sumProfit = 0, sumCnt = 0;
+
+                    sHtml += `<table class="sub-table"><thead><tr>
+                        <th style="width:42px;">順位</th>
+                        <th>購入先（得意先名）</th>
+                        <th style="width:90px;">購入数量</th>
+                        <th style="width:68px;">構成比</th>
+                        <th style="width:110px; background:#fef3c7; color:#b45309;">販売価格<br>(弥生単価)</th>
+                        <th style="width:115px; background:#e0f2fe; color:#0369a1;">原価<br>(1個 / 原価計)</th>
+                        <th style="width:110px;">売上金額<br>(弥生売上)</th>
+                        <th style="width:125px; background:#dcfce7; color:#047857;">利益額<br>(合計 / 1個利益)</th>
+                        <th style="width:80px; background:#dcfce7; color:#047857;">利益率</th>
+                        <th style="width:68px;">伝票数</th>
+                        <th style="width:100px;">最終売上日</th>
+                    </tr></thead><tbody>`;
+
+                    compList.forEach((c, cIdx) => {{
+                        const cQty = Number(c["数量"] || 0);
+                        const cAmt = Math.round(Number(c["金額"] || 0));
+                        const effUnitP = (cQty > 0 && cAmt > 0) ? Math.round(cAmt / cQty) : 0;
+
+                        const cCostTotal = Math.round(cQty * unitCost);
+                        const unitProf = effUnitP - unitCost;
+                        const cProf = cAmt - cCostTotal;
+                        const cMargin = (cAmt > 0) ? ((cProf / cAmt) * 100).toFixed(1) + "%" : "0.0%";
+                        const profColor = (cProf >= 0) ? "#047857" : "#be123c";
+                        const profBg = (cProf >= 0) ? "#ecfdf5" : "#fff1f2";
+
+                        sumQty += cQty;
+                        sumSales += cAmt;
+                        sumCost += cCostTotal;
+                        sumProfit += cProf;
+                        sumCnt += Number(c["伝票回数"] || 0);
+
+                        sHtml += `<tr>
+                            <td style="text-align:center; font-weight:bold;">${{cIdx + 1}}</td>
+                            <td style="font-weight:bold; color:#1e293b;">${{c["得意先名"]}}</td>
+                            <td style="text-align:right; font-weight:bold; color:#ea580c; background:#fff7ed; font-size:15px;">${{fmtNum(cQty)}} 個</td>
+                            <td style="text-align:right; font-weight:bold;">${{c["構成比"]}}</td>
+                            <td style="text-align:right; font-weight:bold; color:#b45309; background:#fffbeb; font-size:15px;">¥${{fmtNum(effUnitP)}}</td>
+                            <td style="text-align:right; background:#f0f9ff; color:#0369a1; font-weight:bold;">
+                                ¥${{fmtNum(unitCost)}}<br><span style="font-size:11px; color:#64748b; font-weight:normal;">(計 ¥${{fmtNum(cCostTotal)}})</span>
+                            </td>
+                            <td style="text-align:right; font-weight:bold; font-size:15px;">¥${{fmtNum(cAmt)}}</td>
+                            <td style="text-align:right; font-weight:bold; color:${{profColor}}; background:${{profBg}}; font-size:15px;">
+                                ¥${{fmtNum(cProf)}}<br><span style="font-size:11px; font-weight:normal;">(1個 ${{unitProf>=0?'+':''}}¥${{fmtNum(unitProf)}})</span>
+                            </td>
+                            <td style="text-align:right; font-weight:bold; color:${{profColor}}; background:${{profBg}}; font-size:15px;">${{cMargin}}</td>
+                            <td style="text-align:center;">${{fmtNum(c["伝票回数"])}} 回</td>
+                            <td style="text-align:center;">${{c["最終売上日"]}}</td>
+                        </tr>`;
+                    }});
+
+                    const totMargin = (sumSales > 0) ? ((sumProfit / sumSales) * 100).toFixed(1) + "%" : "0.0%";
+                    const totColor = (sumProfit >= 0) ? "#047857" : "#be123c";
+                    sHtml += `<tr style="background:#f1f5f9; border-top:2px solid #475569; font-weight:bold;">
+                        <td colspan="2" style="text-align:center; color:#0f172a;">合計（${{compList.length}} 社）</td>
+                        <td style="text-align:right; color:#ea580c; font-size:15px;">${{fmtNum(sumQty)}} 個</td>
+                        <td style="text-align:right;">100%</td>
+                        <td style="text-align:center;">—</td>
+                        <td style="text-align:right; color:#0369a1;">計 ¥${{fmtNum(sumCost)}}</td>
+                        <td style="text-align:right; font-size:15px;">¥${{fmtNum(sumSales)}}</td>
+                        <td style="text-align:right; color:${{totColor}}; font-size:15.5px; background:#bbf7d0;">¥${{fmtNum(sumProfit)}}</td>
+                        <td style="text-align:right; color:${{totColor}}; font-size:15.5px; background:#bbf7d0;">${{totMargin}}</td>
+                        <td style="text-align:center;">${{fmtNum(sumCnt)}} 回</td>
+                        <td style="text-align:center;">—</td>
+                    </tr>`;
+                    sHtml += `</tbody></table>`;
+                }} else {{
+                    sHtml += `<div class="diag-box" style="background:#f8fafc; border:1px solid #cbd5e1; color:#334155;">
+                        <b>📊 期間（${{kiTitle}}）のyayoi_CSV売上明細は 0 件です。</b><br>
+                        上の「期間切替」ボタンで他の期間に切り替えてご確認ください。
+                    </div>`;
+                }}
+
+                if (detList.length > 0) {{
+                    sHtml += `<div class="sec-title" style="margin-top:18px;">📄 弥生 売上伝票明細（最新80件）</div>`;
+                    sHtml += `<table class="sub-table"><thead><tr>
+                        <th style="width:90px;">期間区分</th>
+                        <th style="width:105px;">売上日</th>
+                        <th>得意先名</th>
+                        <th style="width:85px;">数量</th>
+                        <th style="width:95px; background:#fef3c7; color:#b45309;">販売単価(弥生)</th>
+                        <th style="width:95px; background:#e0f2fe; color:#0369a1;">原価(1個)</th>
+                        <th style="width:110px;">売上金額(弥生)</th>
+                        <th style="width:110px; background:#dcfce7; color:#047857;">利益額</th>
+                        <th style="width:80px; background:#dcfce7; color:#047857;">利益率</th>
+                        <th style="width:80px;">担当者</th>
+                    </tr></thead><tbody>`;
+                    detList.forEach(d => {{
+                        const dQty = Number(d["数量"] || 0);
+                        const dAmt = Math.round(Number(d["金額"] || 0));
+                        const dUnitP = (dQty > 0 && dAmt > 0) ? Math.round(dAmt / dQty) : 0;
+                        const dProf = Math.round(dAmt - (dQty * unitCost));
+                        const dMar = dAmt > 0 ? ((dProf / dAmt) * 100).toFixed(1) + "%" : "0.0%";
+                        const dColor = (dProf >= 0) ? "#047857" : "#be123c";
+                        sHtml += `<tr>
+                            <td style="text-align:center; font-weight:bold;">${{d["期"]}}</td>
+                            <td style="text-align:center; font-weight:bold;">${{d["日付"]}}</td>
+                            <td style="font-weight:bold;">${{d["得意先名"]}}</td>
+                            <td style="text-align:right; font-weight:bold; color:#0284c7;">${{fmtNum(dQty)}}</td>
+                            <td style="text-align:right; font-weight:bold; color:#b45309; background:#fffbeb;">¥${{fmtNum(dUnitP)}}</td>
+                            <td style="text-align:right; color:#0369a1;">¥${{fmtNum(unitCost)}}</td>
+                            <td style="text-align:right; font-weight:bold;">¥${{fmtNum(dAmt)}}</td>
+                            <td style="text-align:right; font-weight:bold; color:${{dColor}}; background:#ecfdf5;">¥${{fmtNum(dProf)}}</td>
+                            <td style="text-align:right; font-weight:bold; color:${{dColor}};">${{dMar}}</td>
+                            <td style="text-align:center;">${{d["担当者"]}}</td>
+                        </tr>`;
+                    }});
+                    sHtml += `</tbody></table>`;
+                }}
+                document.getElementById("modal-yayoi-area").innerHTML = sHtml;
             }}
-# 4. 100%『yayoi_CSVの今期売上』と『新原価』だけで売上高・粗利額・粗利率をシンプルに算出
-new_costs, min_gedais, avg_prices, sales_amts, gross_profits, margin_rates, stock_vals = [], [], [], [], [], [], []
-is_new_list, is_surge_list, is_dead_list = [], [], []
-
-for _, r in df_main.iterrows():
-    cn = r["品番_正規化"]
-    # ① 原価と最低下代（POP上部の参考表示用）を『order_r（マスター）.xlsx』の「新原価」シートから取得
-    u_cost = float(cost_map.get(cn, 0.0))
-    raw_gedai = float(gedai_map.get(cn, 0.0))
-    u_gedai = raw_gedai if (0 < raw_gedai < 90000) else 0.0
-
-    # ② 売上高・販売単価は 100%『yayoi_CSV（弥生データ）』の実数値のみを使用！
-    konki_q = int(r["今期出荷"])
-    k77_q = int(r["77期"])
-    s_amt = int(round(float(konki_amt_map.get(cn, 0.0))))
-
-    if konki_q > 0 and s_amt > 0:
-        u_avg_p = round(s_amt / konki_q, 0)
-        cost_total = int(round(konki_q * u_cost))
-        g_profit = s_amt - cost_total
-        m_rate = round((g_profit / s_amt) * 100, 1)
-    else:
-        u_avg_p = 0.0
-        s_amt = 0
-        g_profit = 0
-        m_rate = 0.0
-
-    st_val = int(round(max(int(r["在庫数_ロジザード"]), 0) * u_cost))
-
-    # 🆕 新商品 ／ ⚡ 急増 ／ ❄️ 滞留 の判定
-    is_new = (int(r["74期"]) == 0 and int(r["75期"]) == 0 and (int(r["76期"]) > 0 or k77_q > 0 or konki_q > 0))
-    avg_weekly = max((konki_q / 20.0) if konki_q > 0 else (k77_q / 52.0), 10.0)
-    w_this = int(r["今週売数"])
-    w_prev = int(r["先週売数"])
-    is_surge = (w_this >= 30 and w_this >= max(w_prev * 1.5, avg_weekly * 1.8))
-    is_dead = ((int(r["入荷後のフリー在庫"]) >= 1000 or st_val >= 300000) and int(r["在庫回転率"]) <= 15 and konki_q == 0)
-
-    new_costs.append(int(round(u_cost)))
-    min_gedais.append(int(round(u_gedai)))
-    avg_prices.append(int(round(u_avg_p)))
-    sales_amts.append(s_amt)
-    gross_profits.append(g_profit)
-    margin_rates.append(m_rate)
-    stock_vals.append(st_val)
-    is_new_list.append(is_new)
-    is_surge_list.append(is_surge)
-    is_dead_list.append(is_dead)
-
-df_main["新原価"] = new_costs
-df_main["最低下代"] = min_gedais
-df_main["平均単価"] = avg_prices
-df_main["売上高"] = sales_amts
-df_main["粗利額"] = gross_profits
-df_main["粗利率"] = margin_rates
-df_main["在庫金額"] = stock_vals
-df_main["新商品"] = is_new_list
-df_main["急増"] = is_surge_list
-df_main["滞留"] = is_dead_list
-            // モードC：確保数のズレ診断モード
+            // モードB：確保数のズレ診断モード
             else if (mode === 'zure') {{
                 document.getElementById("modal-sub-title").innerHTML = `⚖️ 【${{code}}】確保数のズレ原因診断 ＆ 全ズレ商品リスト`;
                 const rojiSec = Number(r["確保数_ロジザード"] || 0);
@@ -2451,21 +2467,18 @@ df_main["滞留"] = is_dead_list
                 diagHtml += `</tbody></table>`;
                 document.getElementById("modal-yayoi-area").innerHTML = diagHtml;
             }}
-            // モードD：弥生確保リスト（会社ごとの加盟店販売価格も表示）
+            // モードC：弥生確保リスト
             else {{
-                document.getElementById("modal-sub-title").innerHTML = "🏢 得意先別・弥生確保リスト（会社別の加盟店販売価格つき）";
+                document.getElementById("modal-sub-title").innerHTML = "🏢 得意先別・弥生確保リスト（2027年以降を含む全受注を表示）";
                 const targetList = yayoiMap[codeNorm] || [];
 
                 if (targetList.length === 0) {{
-                    document.getElementById("modal-yayoi-area").innerHTML = `<div style="padding:16px; font-size:14.5px; color:#64748b; background:#f8fafc;">該当する受注確保データはありません。</div>` +
-                        `<div class="sec-title" style="margin-top:18px;">💴 この商品の『会社ごとの販売価格（order_r 加盟店価格）』登録一覧</div>` +
-                        buildKameiPriceTableHtml(codeNorm, unitCost, minGedai);
+                    document.getElementById("modal-yayoi-area").innerHTML = `<div style="padding:16px; font-size:14.5px; color:#64748b; background:#f8fafc;">該当する受注確保データはありません。</div>`;
                 }} else {{
                     let yHtml = `<table class="sub-table"><thead><tr>
                         <th>受注番号</th>
                         <th>得意先名</th>
                         <th style="width:100px;">確保数量</th>
-                        <th style="width:125px; background:#fef3c7; color:#b45309;">販売価格(加盟店価格)</th>
                         <th>受注日</th>
                         <th>納入期日</th>
                         <th>倉庫名</th>
@@ -2473,13 +2486,10 @@ df_main["滞留"] = is_dead_list
                         <th>備考</th>
                     </tr></thead><tbody>`;
                     targetList.forEach(y => {{
-                        const kp = findCompanyKameiPrice(codeNorm, y["得意先名"]);
-                        const kpStr = kp ? `¥${{fmtNum(kp)}}` : (minGedai > 0 ? `¥${{fmtNum(minGedai)}} (最低下代)` : "—");
                         yHtml += `<tr>
                             <td style="text-align:center; font-weight:bold;">${{y["受注番号"] || ""}}</td>
                             <td style="font-weight:bold;">${{y["得意先名"]}}</td>
                             <td style="text-align:right; font-weight:bold; color:#0284c7; font-size:15.5px;">${{fmtNum(y["数量"])}}</td>
-                            <td style="text-align:right; font-weight:bold; color:#b45309; background:#fffbeb;">${{kpStr}}</td>
                             <td style="text-align:center; font-weight:bold;">${{y["受注日"]}}</td>
                             <td style="text-align:center;">${{y["納入期日"]}}</td>
                             <td style="text-align:center; font-weight:bold;">${{y["倉庫名"] || ""}}</td>
@@ -2488,11 +2498,9 @@ df_main["滞留"] = is_dead_list
                         </tr>`;
                     }});
                     yHtml += `</tbody></table>`;
-                    yHtml += `<div class="sec-title" style="margin-top:18px;">💴 この商品の『会社ごとの販売価格（order_r 加盟店価格）』登録一覧</div>`;
-                    yHtml += buildKameiPriceTableHtml(codeNorm, unitCost, minGedai);
                     document.getElementById("modal-yayoi-area").innerHTML = yHtml;
                 }}
-            
+            }}
 
             const hList = histMap[code] || [];
             if (hList.length === 0) {{
