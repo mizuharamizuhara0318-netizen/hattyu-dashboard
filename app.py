@@ -635,48 +635,100 @@ def parse_yayoi_sales_csv(fname: str, raw_bytes: bytes, mtime_str: str = "") -> 
                     return orig_c
         return None
 
-    c_code = f_col(["商品コード", "品番", "型番", "商品番号", "code"])
-    c_cust = f_col(["得意先名称", "得意先名", "会社名", "販売先", "顧客名", "得意先略称", "cust"])
-    c_qty = f_col(["数量", "売上数", "出荷数", "個数", "バラ数", "qty"])
-    c_price = f_col(["単価", "売上単価", "納入単価", "税抜単価", "price"])
-    c_amt = f_col(["金額", "売上金額", "税抜金額", "明細金額", "amount"])
+    c_code = f_col(["商品コード", "品番", "型番", "商品番号", "商品の코드", "code"])
+    c_cust = f_col(["得意先名称", "得意先名", "会社名", "販売先", "顧客名", "得意先略称", "出荷先名", "cust"])
+    c_qty = f_col(["数量", "売上数", "出荷数", "個数", "バラ数", "受注数", "qty"])
+    c_price = f_col(["単価", "売上単価", "納入単価", "税抜単価", "販売単価", "売単価", "price"])
+    c_amt = f_col(["金額", "売上金額", "税抜金額", "明細金額", "純売上額", "売上高", "amount"])
     c_dt = f_col(["売上日", "出荷日", "伝票日付", "日付", "受注日", "date"])
     c_stf = f_col(["担当者名", "担当者", "入力者", "staff"])
 
-    # 見出しなし弥生CSVの場合の自動列推定
-    if c_code is None or c_qty is None:
-        for enc in ["cp932", "shift_jis", "utf-8-sig", "utf-8"]:
-            try:
-                df_nohead = pd.read_csv(io.BytesIO(raw_bytes), encoding=enc, header=None, low_memory=False)
-                if not df_nohead.empty and len(df_nohead.columns) >= 5:
-                    df = df_nohead
-                    break
-            except Exception:
-                continue
+    # 1行目が見出しではなくデータ行（ヘッダーなし弥生CSV）だった場合、または単価・金額列が特定できない場合の自動検出
+    if c_code is None or c_qty is None or (c_price is None and c_amt is None):
+        first_row_vals = [clean_str(x) for x in df.columns]
+        has_code_in_header = any(re.match(r'^[A-Z]{2,4}-[0-9A-Z-]+$', v.upper()) for v in first_row_vals)
+        if has_code_in_header or c_code is None:
+            for enc in ["cp932", "shift_jis", "utf-8-sig", "utf-8"]:
+                try:
+                    df_nohead = pd.read_csv(io.BytesIO(raw_bytes), encoding=enc, header=None, low_memory=False)
+                    if not df_nohead.empty and len(df_nohead.columns) >= 4:
+                        df = df_nohead
+                        break
+                except Exception:
+                    continue
 
-        sample_row = [clean_str(x) for x in df.iloc[0].values]
+        # 複数行をスキャンして「型番列」「日付列」「数量×単価＝金額 となる3列」を自動特定！
         code_col_idx = None
         date_col_idx = None
-        for idx_c, val in enumerate(sample_row):
-            if code_col_idx is None and re.match(r'^[A-Z]{2,4}-[0-9A-Z-]+$', val.upper()):
-                code_col_idx = idx_c
-            if date_col_idx is None and re.match(r'^(?:202[0-9]|R\d|令和\d)[-/\s年.]?[01]?[0-9][-/\s月.]?[0-3]?[0-9]', val):
-                date_col_idx = idx_c
+        qty_col_idx = None
+        price_col_idx = None
+        amt_col_idx = None
 
-        if code_col_idx is not None:
-            c_code = df.columns[code_col_idx]
-            c_dt = df.columns[date_col_idx] if date_col_idx is not None else (df.columns[1] if len(df.columns) > 1 else None)
-            c_cust = df.columns[5] if len(df.columns) > 5 else df.columns[0]
-            c_qty = df.columns[min(code_col_idx + 4, len(df.columns) - 1)]
-            for offset_q in [4, 5, 3, 2, 6, 7, 8, 1]:
-                if code_col_idx + offset_q < len(df.columns):
-                    v_test = clean_str(df.iloc[0, code_col_idx + offset_q]).replace(",", "")
-                    if v_test.replace("-", "").isdigit():
-                        c_qty = df.columns[code_col_idx + offset_q]
+        for r_i in range(min(15, len(df))):
+            row_v = [clean_str(x) for x in df.iloc[r_i].values]
+            if code_col_idx is None:
+                for idx_c, val in enumerate(row_v):
+                    if re.match(r'^[A-Z]{2,4}-[0-9A-Z-]+$', val.upper()):
+                        code_col_idx = idx_c
                         break
-            c_price = None
-            c_amt = None
-            c_stf = None
+            if date_col_idx is None:
+                for idx_c, val in enumerate(row_v):
+                    if re.match(r'^(?:202[0-9]|R\d|令和\d)[-/\s年.]?[01]?[0-9][-/\s月.]?[0-3]?[0-9]', val):
+                        date_col_idx = idx_c
+                        break
+            if code_col_idx is not None and qty_col_idx is None:
+                # 型番列より右側にある数値列を抽出し、数量(q) * 単価(p) == 金額(a) が成り立つ列セットを探す
+                nums = []
+                for idx_c in range(code_col_idx + 1, len(row_v)):
+                    v_str = row_v[idx_c].replace(",", "").replace("¥", "").replace("円", "").strip()
+                    if v_str and re.match(r'^-?\d+(\.\d+)?$', v_str):
+                        nums.append((idx_c, float(v_str)))
+                for i_n in range(len(nums)):
+                    iq, vq = nums[i_n]
+                    if vq <= 0:
+                        continue
+                    for j_n in range(i_n + 1, len(nums)):
+                        ip, vp = nums[j_n]
+                        if vp <= 0:
+                            continue
+                        for k_n in range(j_n + 1, len(nums)):
+                            ia, va = nums[k_n]
+                            if va > 0 and abs(vq * vp - va) <= max(1.0, va * 0.01) and (vp >= 5 or va >= 10):
+                                qty_col_idx, price_col_idx, amt_col_idx = iq, ip, ia
+                                break
+                        if qty_col_idx is not None:
+                            break
+                    if qty_col_idx is not None:
+                        break
+
+        if code_col_idx is not None and c_code is None:
+            c_code = df.columns[code_col_idx]
+        if date_col_idx is not None and c_dt is None:
+            c_dt = df.columns[date_col_idx]
+        if c_cust is None and code_col_idx is not None:
+            # 型番列より左側にある日本語文字列の列を得意先名として自動選択
+            for idx_c in range(code_col_idx - 1, -1, -1):
+                sample_txt = clean_str(df.iloc[0, idx_c])
+                if len(sample_txt) >= 2 and not sample_txt.replace("-", "").replace("/", "").isdigit():
+                    c_cust = df.columns[idx_c]
+                    break
+        if qty_col_idx is not None:
+            if c_qty is None: c_qty = df.columns[qty_col_idx]
+            if c_price is None: c_price = df.columns[price_col_idx]
+            if c_amt is None: c_amt = df.columns[amt_col_idx]
+        elif code_col_idx is not None and c_qty is None:
+            # 万が一3列セットが見つからない場合のフォールバック
+            num_cols = []
+            for idx_c in range(code_col_idx + 1, len(df.columns)):
+                v_test = clean_str(df.iloc[0, idx_c]).replace(",", "")
+                if v_test and re.match(r'^-?\d+(\.\d+)?$', v_test):
+                    num_cols.append(df.columns[idx_c])
+            if len(num_cols) >= 3:
+                c_qty, c_price, c_amt = num_cols[0], num_cols[1], num_cols[2]
+            elif len(num_cols) == 2:
+                c_qty, c_price = num_cols[0], num_cols[1]
+            elif len(num_cols) == 1:
+                c_qty = num_cols[0]
 
     if c_code is None or c_qty is None:
         return pd.DataFrame()
@@ -688,9 +740,10 @@ def parse_yayoi_sales_csv(fname: str, raw_bytes: bytes, mtime_str: str = "") -> 
     out["price"] = df[c_price].apply(to_num) if c_price is not None else 0.0
     raw_amt = df[c_amt].apply(to_num) if c_amt is not None else pd.Series([0.0] * len(df))
     calc_amt = out["qty"] * out["price"]
-    # 金額列が0または「単価と同じ数字（数量が掛けられていない）」場合は、数量×単価を優先採用
+
+    # 金額列があればそれを使い、もし金額列が0で単価列がある場合は「数量×単価」で金額を算出
     out["amount"] = [
-        ca if (ra <= 0 or (q > 1 and abs(ra - p) < 1 and ca > ra)) else ra
+        ra if (ra > 0 and not (q > 1 and abs(ra - p) < 1 and ca > ra)) else ca
         for ra, ca, q, p in zip(raw_amt, calc_amt, out["qty"], out["price"])
     ]
     out["staff"] = df[c_stf].apply(clean_str) if c_stf is not None else ""
@@ -1552,45 +1605,29 @@ for ki_col in ["77期", "76期", "75期", "74期"]:
                 sales_comp_map[cn][ki_col] = cur_list
     df_main[ki_col] = new_ki_vals
 
-# 4. 『今期（26/7〜）の売上だけ』で今期売上高・今期粗利額・今期粗利率を算出（過去期は一切混ぜない）
+# 4. 100%『yayoi_CSVの今期売上』と『新原価』だけで売上高・粗利額・粗利率をシンプルに算出
 new_costs, min_gedais, avg_prices, sales_amts, gross_profits, margin_rates, stock_vals = [], [], [], [], [], [], []
 is_new_list, is_surge_list, is_dead_list = [], [], []
 
 for _, r in df_main.iterrows():
     cn = r["品番_正規化"]
-    # ① 原価・下代は『order_r（マスター）.xlsx』の「新原価」「item」シートから取得
+    # ① 原価と最低下代（POP上部の参考表示用）を『order_r（マスター）.xlsx』の「新原価」シートから取得
     u_cost = float(cost_map.get(cn, 0.0))
     raw_gedai = float(gedai_map.get(cn, 0.0))
-    raw_std_p = float(std_price_map.get(cn, 0.0))
+    u_gedai = raw_gedai if (0 < raw_gedai < 90000) else 0.0
 
-    # 標準販売単価（itemシートの販売価格 または 新原価シートの最低下代）
-    if 0 < raw_std_p < 90000:
-        u_gedai = raw_std_p
-    elif 0 < raw_gedai < 90000:
-        u_gedai = raw_gedai
-    else:
-        u_gedai = round(u_cost / 0.65, 0) if u_cost > 0 else 0.0
-
-    # ② 今期（26/7〜）の売上数量と売上金額のみを使用（300円などの特価販売もCSVの実売単価をそのまま採用！）
+    # ② 売上高・販売単価は 100%『yayoi_CSV（弥生データ）』の実数値のみを使用！
     konki_q = int(r["今期出荷"])
     k77_q = int(r["77期"])
-    csv_amt = float(konki_amt_map.get(cn, 0.0))
-    csv_unit_p = (csv_amt / konki_q) if (konki_q > 0 and csv_amt > 0) else 0.0
+    s_amt = int(round(float(konki_amt_map.get(cn, 0.0))))
 
-    if csv_unit_p > 0:
-        u_avg_p = csv_unit_p
-    elif u_gedai > 0:
-        u_avg_p = u_gedai
-    else:
-        u_avg_p = round(u_cost / 0.65, 0) if u_cost > 0 else 0.0
-
-    # ③ 今期の売上高・粗利額・粗利率を算出（CSVに実売金額があれば100%その金額を使用）
-    if konki_q > 0 and u_avg_p > 0:
-        s_amt = int(round(csv_amt)) if csv_amt > 0 else int(round(konki_q * u_avg_p))
-        cost_total = int(round(konki_q * u_cost)) if u_cost > 0 else int(round(s_amt * 0.65))
+    if konki_q > 0 and s_amt > 0:
+        u_avg_p = round(s_amt / konki_q, 0)
+        cost_total = int(round(konki_q * u_cost))
         g_profit = s_amt - cost_total
-        m_rate = round((g_profit / s_amt) * 100, 1) if s_amt > 0 else 0.0
+        m_rate = round((g_profit / s_amt) * 100, 1)
     else:
+        u_avg_p = 0.0
         s_amt = 0
         g_profit = 0
         m_rate = 0.0
@@ -2298,157 +2335,64 @@ with tab1:
                 document.getElementById("modal-sub-title").innerHTML = `💴 【${{code}}】会社ごとの販売価格一覧（order_r『加盟店価格』シート参照：全 ${{kCount}} 件）`;
                 document.getElementById("modal-yayoi-area").innerHTML = buildKameiPriceTableHtml(codeNorm, unitCost, minGedai);
             }}
-// モードB：売上実績・購入先内訳モード（原価・利益額・利益率・合計行つき！）
-            else if (mode === 'sales') {{
-                let kiTitle = currentKiFilter;
-                if (currentKiFilter === 'THIS_WEEK') kiTitle = thisWeekLabel;
-                else if (currentKiFilter === 'PREV_WEEK') kiTitle = prevWeekLabel;
-                else if (currentKiFilter === 'ALL') kiTitle = "全期間累計";
+# 4. 100%『yayoi_CSVの今期売上』と『新原価』だけで売上高・粗利額・粗利率をシンプルに算出
+new_costs, min_gedais, avg_prices, sales_amts, gross_profits, margin_rates, stock_vals = [], [], [], [], [], [], []
+is_new_list, is_surge_list, is_dead_list = [], [], []
 
-                let kiBtnsHtml = `
-                    <div style="display:flex; gap:8px; margin-bottom:12px; align-items:center; flex-wrap:wrap;">
-                        <span style="font-size:13px; font-weight:bold; color:#334155;">期間切替:</span>
-                        <button class="stamp-btn" style="${{currentKiFilter==='THIS_WEEK'?'background:#b45309;color:#fff;':''}}" onclick="openModal(${{idx}}, 'sales', 'THIS_WEEK')">⚡ ${{thisWeekLabel}} (${{fmtNum(r['今週売数'])}}個)</button>
-                        <button class="stamp-btn" style="${{currentKiFilter==='PREV_WEEK'?'background:#b45309;color:#fff;':''}}" onclick="openModal(${{idx}}, 'sales', 'PREV_WEEK')">📅 ${{prevWeekLabel}} (${{fmtNum(r['先週売数'])}}個)</button>
-                        <button class="stamp-btn" style="${{currentKiFilter==='今期(26/7〜)'?'background:#ea580c;color:#fff;':''}}" onclick="openModal(${{idx}}, 'sales', '今期(26/7〜)')">🔥 今期 26/7〜 (${{fmtNum(r['今期出荷'])}}個)</button>
-                        <button class="stamp-btn" style="${{currentKiFilter==='77期'?'background:#1e40af;color:#fff;':''}}" onclick="openModal(${{idx}}, 'sales', '77期')">77期 (${{fmtNum(r['77期'])}}個)</button>
-                        <button class="stamp-btn" style="${{currentKiFilter==='76期'?'background:#1e40af;color:#fff;':''}}" onclick="openModal(${{idx}}, 'sales', '76期')">76期 (${{fmtNum(r['76期'])}}個)</button>
-                        <button class="stamp-btn" style="${{currentKiFilter==='75期'?'background:#1e40af;color:#fff;':''}}" onclick="openModal(${{idx}}, 'sales', '75期')">75期 (${{fmtNum(r['75期'])}}個)</button>
-                        <button class="stamp-btn" style="${{currentKiFilter==='74期'?'background:#1e40af;color:#fff;':''}}" onclick="openModal(${{idx}}, 'sales', '74期')">74期 (${{fmtNum(r['74期'])}}個)</button>
-                        <button class="stamp-btn" style="${{currentKiFilter==='ALL'?'background:#047857;color:#fff;':''}}" onclick="openModal(${{idx}}, 'sales', 'ALL')">💰 全期間累計</button>
-                    </div>
-                `;
-                document.getElementById("modal-sub-title").innerHTML = `🔥 【${{code}}】どこで売れたか（得意先別 売上・原価・利益額・利益率：${{kiTitle}}）`;
+for _, r in df_main.iterrows():
+    cn = r["品番_正規化"]
+    # ① 原価と最低下代（POP上部の参考表示用）を『order_r（マスター）.xlsx』の「新原価」シートから取得
+    u_cost = float(cost_map.get(cn, 0.0))
+    raw_gedai = float(gedai_map.get(cn, 0.0))
+    u_gedai = raw_gedai if (0 < raw_gedai < 90000) else 0.0
 
-                const codeSalesObj = salesCompMap[codeNorm] || {{}};
-                const compList = codeSalesObj[currentKiFilter] || [];
-                const detList = salesDetMap[codeNorm] || [];
+    # ② 売上高・販売単価は 100%『yayoi_CSV（弥生データ）』の実数値のみを使用！
+    konki_q = int(r["今期出荷"])
+    k77_q = int(r["77期"])
+    s_amt = int(round(float(konki_amt_map.get(cn, 0.0))))
 
-                let sHtml = kiBtnsHtml;
-                if (compList.length > 0) {{
-                    let sumQty = 0, sumSales = 0, sumCost = 0, sumProfit = 0, sumCnt = 0;
+    if konki_q > 0 and s_amt > 0:
+        u_avg_p = round(s_amt / konki_q, 0)
+        cost_total = int(round(konki_q * u_cost))
+        g_profit = s_amt - cost_total
+        m_rate = round((g_profit / s_amt) * 100, 1)
+    else:
+        u_avg_p = 0.0
+        s_amt = 0
+        g_profit = 0
+        m_rate = 0.0
 
-                    sHtml += `<table class="sub-table"><thead><tr>
-                        <th style="width:42px;">順位</th>
-                        <th>購入先（得意先名）</th>
-                        <th style="width:90px;">購入数量</th>
-                        <th style="width:68px;">構成比</th>
-                        <th style="width:115px; background:#fef3c7; color:#b45309;">販売価格<br>(加盟店価格)</th>
-                        <th style="width:115px; background:#e0f2fe; color:#0369a1;">原価<br>(1個 / 原価計)</th>
-                        <th style="width:105px;">売上金額</th>
-                        <th style="width:125px; background:#dcfce7; color:#047857;">利益額<br>(合計 / 1個利益)</th>
-                        <th style="width:80px; background:#dcfce7; color:#047857;">利益率</th>
-                        <th style="width:68px;">伝票数</th>
-                        <th style="width:100px;">最終売上日</th>
-                    </tr></thead><tbody>`;
+    st_val = int(round(max(int(r["在庫数_ロジザード"]), 0) * u_cost))
 
-                    compList.forEach((c, cIdx) => {{
-                        const cQty = Number(c["数量"] || 0);
-                        const kPrice = findCompanyKameiPrice(codeNorm, c["得意先名"]);
-                        const fallbackUnitP = kPrice || Number(r["平均単価"] || minGedai || 0);
-                        const rawAmt = Number(c["金額"] || 0);
-                        // ★ CSVに売上金額(rawAmt)があれば、原価より安い特価(300円など)でも書き換えずにそのまま採用！
-                        const cAmt = (rawAmt > 0) ? rawAmt : Math.round(cQty * fallbackUnitP);
-                        const effUnitP = (cQty > 0 && cAmt > 0) ? Math.round(cAmt / cQty) : fallbackUnitP;
-                        const dispUnitP = (kPrice && kPrice !== effUnitP)
-                            ? `¥${{fmtNum(effUnitP)}} <br><span style="font-size:10.5px;color:#78350f;">(加盟店登録:¥${{fmtNum(kPrice)}})</span>`
-                            : (kPrice ? `¥${{fmtNum(effUnitP)}} <span style="font-size:10.5px;color:#78350f;">(登録値)</span>` : `¥${{fmtNum(effUnitP)}} <span style="font-size:10.5px;color:#64748b;">(実売)</span>`);
+    # 🆕 新商品 ／ ⚡ 急増 ／ ❄️ 滞留 の判定
+    is_new = (int(r["74期"]) == 0 and int(r["75期"]) == 0 and (int(r["76期"]) > 0 or k77_q > 0 or konki_q > 0))
+    avg_weekly = max((konki_q / 20.0) if konki_q > 0 else (k77_q / 52.0), 10.0)
+    w_this = int(r["今週売数"])
+    w_prev = int(r["先週売数"])
+    is_surge = (w_this >= 30 and w_this >= max(w_prev * 1.5, avg_weekly * 1.8))
+    is_dead = ((int(r["入荷後のフリー在庫"]) >= 1000 or st_val >= 300000) and int(r["在庫回転率"]) <= 15 and konki_q == 0)
 
-                        const cCostTotal = Math.round(cQty * unitCost);
-                        const unitProf = effUnitP - unitCost;
-                        const cProf = (cAmt > 0 && unitCost > 0) ? Math.max(0, Math.round(cAmt - cCostTotal)) : 0;
-                        const cMargin = (cAmt > 0) ? ((cProf / cAmt) * 100).toFixed(1) + "%" : "0.0%";
+    new_costs.append(int(round(u_cost)))
+    min_gedais.append(int(round(u_gedai)))
+    avg_prices.append(int(round(u_avg_p)))
+    sales_amts.append(s_amt)
+    gross_profits.append(g_profit)
+    margin_rates.append(m_rate)
+    stock_vals.append(st_val)
+    is_new_list.append(is_new)
+    is_surge_list.append(is_surge)
+    is_dead_list.append(is_dead)
 
-                        sumQty += cQty;
-                        sumSales += cAmt;
-                        sumCost += cCostTotal;
-                        sumProfit += cProf;
-                        sumCnt += Number(c["伝票回数"] || 0);
-
-                        sHtml += `<tr>
-                            <td style="text-align:center; font-weight:bold;">${{cIdx + 1}}</td>
-                            <td style="font-weight:bold; color:#1e293b;">${{c["得意先名"]}}</td>
-                            <td style="text-align:right; font-weight:bold; color:#ea580c; background:#fff7ed; font-size:15px;">${{fmtNum(cQty)}} 個</td>
-                            <td style="text-align:right; font-weight:bold;">${{c["構成比"]}}</td>
-                            <td style="text-align:right; font-weight:bold; color:#b45309; background:#fffbeb;">${{dispUnitP}}</td>
-                            <td style="text-align:right; background:#f0f9ff; color:#0369a1; font-weight:bold;">
-                                ¥${{fmtNum(unitCost)}}<br><span style="font-size:11px; color:#64748b; font-weight:normal;">(計 ¥${{fmtNum(cCostTotal)}})</span>
-                            </td>
-                            <td style="text-align:right; font-weight:bold;">¥${{fmtNum(cAmt)}}</td>
-                            <td style="text-align:right; font-weight:bold; color:#047857; background:#ecfdf5; font-size:15px;">
-                                ¥${{fmtNum(cProf)}}<br><span style="font-size:11px; color:#065f46; font-weight:normal;">(1個 +¥${{fmtNum(unitProf)}})</span>
-                            </td>
-                            <td style="text-align:right; font-weight:bold; color:#047857; background:#d1fae5; font-size:15px;">${{cMargin}}</td>
-                            <td style="text-align:center;">${{fmtNum(c["伝票回数"])}} 回</td>
-                            <td style="text-align:center;">${{c["最終売上日"]}}</td>
-                        </tr>`;
-                    }});
-
-                    const totMargin = (sumSales > 0) ? ((sumProfit / sumSales) * 100).toFixed(1) + "%" : "0.0%";
-                    sHtml += `<tr style="background:#f1f5f9; border-top:2px solid #475569; font-weight:bold;">
-                        <td colspan="2" style="text-align:center; color:#0f172a;">合計（${{compList.length}} 社）</td>
-                        <td style="text-align:right; color:#ea580c; font-size:15px;">${{fmtNum(sumQty)}} 個</td>
-                        <td style="text-align:right;">100%</td>
-                        <td style="text-align:center;">—</td>
-                        <td style="text-align:right; color:#0369a1;">計 ¥${{fmtNum(sumCost)}}</td>
-                        <td style="text-align:right; font-size:15px;">¥${{fmtNum(sumSales)}}</td>
-                        <td style="text-align:right; color:#047857; font-size:15.5px; background:#bbf7d0;">¥${{fmtNum(sumProfit)}}</td>
-                        <td style="text-align:right; color:#047857; font-size:15.5px; background:#bbf7d0;">${{totMargin}}</td>
-                        <td style="text-align:center;">${{fmtNum(sumCnt)}} 回</td>
-                        <td style="text-align:center;">—</td>
-                    </tr>`;
-                    sHtml += `</tbody></table>`;
-                }} else {{
-                    sHtml += `<div class="diag-box" style="background:#f8fafc; border:1px solid #cbd5e1; color:#334155;">
-                        <b>📊 期間（${{kiTitle}}）のyayoi_CSV売上明細は 0 件です。</b><br>
-                        上の「期間切替」ボタンで他の期間に切り替えるか、下の『会社ごとの販売価格（加盟店価格）一覧』をご確認ください。
-                    </div>`;
-                }}
-
-                const kCount = (kameiPriceMap[codeNorm] || []).length;
-                sHtml += `<div class="sec-title" style="margin-top:18px;">💴 この商品の『会社ごとの販売価格（order_r 加盟店価格シート）』登録一覧（全 ${{kCount}} 件）</div>`;
-                sHtml += buildKameiPriceTableHtml(codeNorm, unitCost, minGedai);
-
-                if (detList.length > 0) {{
-                    sHtml += `<div class="sec-title" style="margin-top:18px;">📄 売上伝票明細（最新60件）</div>`;
-                    sHtml += `<table class="sub-table"><thead><tr>
-                        <th style="width:90px;">期間区分</th>
-                        <th style="width:105px;">売上日</th>
-                        <th>得意先名</th>
-                        <th style="width:85px;">数量</th>
-                        <th style="width:95px;">販売単価</th>
-                        <th style="width:95px;">原価(1個)</th>
-                        <th style="width:110px;">売上金額</th>
-                        <th style="width:110px;">利益額</th>
-                        <th style="width:80px;">利益率</th>
-                        <th style="width:80px;">担当者</th>
-                    </tr></thead><tbody>`;
-                    detList.forEach(d => {{
-                        const dQty = Number(d["数量"] || 0);
-                        const kp = findCompanyKameiPrice(codeNorm, d["得意先名"]);
-                        const fbP = kp || Number(r["平均単価"] || minGedai || 0);
-                        const rawDAmt = Number(d["金額"] || 0);
-                        const dAmt = (rawDAmt > 0) ? rawDAmt : Math.round(dQty * fbP);
-                        const dUnitP = dQty > 0 ? Math.round(dAmt / dQty) : fbP;
-                        const dProf = Math.round(dAmt - (dQty * unitCost));
-                        const dMar = dAmt > 0 ? ((dProf / dAmt) * 100).toFixed(1) + "%" : "0.0%";
-                        sHtml += `<tr>
-                            <td style="text-align:center; font-weight:bold;">${{d["期"]}}</td>
-                            <td style="text-align:center; font-weight:bold;">${{d["日付"]}}</td>
-                            <td style="font-weight:bold;">${{d["得意先名"]}}</td>
-                            <td style="text-align:right; font-weight:bold; color:#0284c7;">${{fmtNum(dQty)}}</td>
-                            <td style="text-align:right;">¥${{fmtNum(dUnitP)}}</td>
-                            <td style="text-align:right; color:#0369a1;">¥${{fmtNum(unitCost)}}</td>
-                            <td style="text-align:right; font-weight:bold;">¥${{fmtNum(dAmt)}}</td>
-                            <td style="text-align:right; font-weight:bold; color:#047857; background:#ecfdf5;">¥${{fmtNum(dProf)}}</td>
-                            <td style="text-align:right; font-weight:bold; color:#047857;">${{dMar}}</td>
-                            <td style="text-align:center;">${{d["担当者"]}}</td>
-                        </tr>`;
-                    }});
-                    sHtml += `</tbody></table>`;
-                }}
-                document.getElementById("modal-yayoi-area").innerHTML = sHtml;
-            }}
+df_main["新原価"] = new_costs
+df_main["最低下代"] = min_gedais
+df_main["平均単価"] = avg_prices
+df_main["売上高"] = sales_amts
+df_main["粗利額"] = gross_profits
+df_main["粗利率"] = margin_rates
+df_main["在庫金額"] = stock_vals
+df_main["新商品"] = is_new_list
+df_main["急増"] = is_surge_list
+df_main["滞留"] = is_dead_list
             // モードC：確保数のズレ診断モード
             else if (mode === 'zure') {{
                 document.getElementById("modal-sub-title").innerHTML = `⚖️ 【${{code}}】確保数のズレ原因診断 ＆ 全ズレ商品リスト`;
