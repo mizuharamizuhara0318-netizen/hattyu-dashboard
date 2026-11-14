@@ -2492,7 +2492,7 @@ df_main["滞留"] = is_dead_list
                     yHtml += buildKameiPriceTableHtml(codeNorm, unitCost, minGedai);
                     document.getElementById("modal-yayoi-area").innerHTML = yHtml;
                 }}
-            }}
+            
 
             const hList = histMap[code] || [];
             if (hList.length === 0) {{
