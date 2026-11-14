@@ -724,7 +724,7 @@ def parse_yayoi_sales_csv(fname: str, raw_bytes: bytes, mtime_str: str = "") -> 
     out["ki"] = out["dt"].apply(calc_ki)
     return out
 
-@st.cache_data(ttl=3600, show_spinner="🔥 売上データ(yayoi_CSV)から『先週vs今週の売れ数』『購入先ランキング』『売上・粗利』を計算中...")
+@st.cache_data(ttl=3600, show_spinner="🔥 売上データ(yayoi_CSV)から全期間（今期・77期〜74期・週次）の売上と購入先を完全一致集計中...")
 def fetch_and_build_yayoi_sales_from_gdrive(up_sales_bytes, up_sales_name, target_codes_tuple):
     target_set = set(target_codes_tuple)
     dfs = []
@@ -735,7 +735,7 @@ def fetch_and_build_yayoi_sales_from_gdrive(up_sales_bytes, up_sales_name, targe
         if not df_u.empty:
             dfs.append(df_u)
 
-    # 1. ローカルに G:\マイドライブ\売上ダッシュボード 等がある場合は直接高速スキャン
+    # 1. ローカルPC（G:\マイドライブ\売上ダッシュボード 等）のスキャン
     for base_d in LOCAL_SEARCH_DIRS:
         if os.path.exists(base_d) and ("売上ダッシュボード" in base_d or "発注検討" in base_d):
             try:
@@ -752,7 +752,7 @@ def fetch_and_build_yayoi_sales_from_gdrive(up_sales_bytes, up_sales_name, targe
             except Exception:
                 pass
 
-    # 2. クラウド実行時（ローカルで見つからない場合）はGoogle Drive APIから並列ダウンロード
+    # 2. Google Drive APIから全サブフォルダ（2022年〜2026年 > 1月〜12月）のyayoi_CSVを検索
     creds_info = get_gdrive_creds_info()
     csv_file_metas = []
 
@@ -765,6 +765,33 @@ def fetch_and_build_yayoi_sales_from_gdrive(up_sales_bytes, up_sales_name, targe
             )
             service = build("drive", "v3", credentials=creds)
 
+            # フォルダIDとフォルダ名（2025年、12月など）の対応表を取得して親フォルダから年を特定できるようにする
+            folder_map = {}
+            f_res = service.files().list(
+                q="trashed = false and mimeType = 'application/vnd.google-apps.folder'",
+                pageSize=500,
+                fields="files(id, name, parents)",
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True
+            ).execute()
+            for fd in f_res.get("files", []):
+                folder_map[fd["id"]] = (fd.get("name", ""), fd.get("parents", []))
+
+            def get_folder_path_str(parent_ids):
+                parts = []
+                cur_ids = list(parent_ids or [])
+                depth = 0
+                while cur_ids and depth < 4:
+                    pid = cur_ids[0]
+                    if pid in folder_map:
+                        fnm, p_parents = folder_map[pid]
+                        parts.append(fnm)
+                        cur_ids = p_parents
+                    else:
+                        break
+                    depth += 1
+                return "/".join(reversed(parts))
+
             page_token = None
             q = "trashed = false and (name contains 'yayoi_' or name contains '弥生' or name contains '売上') and (mimeType contains 'csv' or name contains '.csv')"
             while True:
@@ -772,7 +799,7 @@ def fetch_and_build_yayoi_sales_from_gdrive(up_sales_bytes, up_sales_name, targe
                     q=q,
                     pageSize=250,
                     pageToken=page_token,
-                    fields="nextPageToken, files(id, name, modifiedTime, size)",
+                    fields="nextPageToken, files(id, name, parents, modifiedTime, size)",
                     orderBy="modifiedTime desc",
                     supportsAllDrives=True,
                     includeItemsFromAllDrives=True
@@ -781,10 +808,12 @@ def fetch_and_build_yayoi_sales_from_gdrive(up_sales_bytes, up_sales_name, targe
                 for f in batch_files:
                     fn = f.get("name", "")
                     mt = f.get("modifiedTime", "")
+                    p_str = get_folder_path_str(f.get("parents", []))
+                    full_virtual_name = f"{p_str}/{fn}" if p_str else fn
                     if fn.lower().endswith(".csv") and not fn.startswith("~$"):
-                        csv_file_metas.append((f["id"], fn, mt))
+                        csv_file_metas.append((f["id"], full_virtual_name, mt))
                 page_token = res.get("nextPageToken")
-                if not page_token or len(csv_file_metas) >= 800:
+                if not page_token or len(csv_file_metas) >= 1500:
                     break
         except Exception:
             pass
@@ -794,7 +823,7 @@ def fetch_and_build_yayoi_sales_from_gdrive(up_sales_bytes, up_sales_name, targe
         from googleapiclient.discovery import build
 
         def dl_and_parse_worker(meta_item):
-            fid, fname, mtime_str = meta_item
+            fid, fname_with_path, mtime_str = meta_item
             try:
                 c_obj = service_account.Credentials.from_service_account_info(
                     creds_info, scopes=["https://www.googleapis.com/auth/drive.readonly"]
@@ -802,7 +831,7 @@ def fetch_and_build_yayoi_sales_from_gdrive(up_sales_bytes, up_sales_name, targe
                 srv = build("drive", "v3", credentials=c_obj, cache_discovery=False)
                 raw_b = srv.files().get_media(fileId=fid, supportsAllDrives=True).execute()
                 if raw_b:
-                    df_p = parse_yayoi_sales_csv(fname, raw_b, mtime_str)
+                    df_p = parse_yayoi_sales_csv(fname_with_path, raw_b, mtime_str)
                     if not df_p.empty:
                         return df_p[df_p["code_norm"].isin(target_set)]
             except Exception:
@@ -825,7 +854,6 @@ def fetch_and_build_yayoi_sales_from_gdrive(up_sales_bytes, up_sales_name, targe
     if df_all.empty:
         return {}, {}, {}, "", total_files_cnt
 
-    # ★ 最新売上日を基準にして「今週(直近7日間)」と「先週(その前の7日間)」を自動判定
     valid_dts = df_all["dt"].dropna()
     max_sales_dt = valid_dts.max() if not valid_dts.empty else pd.Timestamp.now()
     this_w_start = max_sales_dt - pd.Timedelta(days=6)
@@ -848,6 +876,13 @@ def fetch_and_build_yayoi_sales_from_gdrive(up_sales_bytes, up_sales_name, targe
     konki_qty_map = df_konki.groupby("code_norm")["qty"].sum().round().astype(int).to_dict() if not df_konki.empty else {}
     konki_amt_map = df_konki.groupby("code_norm")["amount"].sum().round().astype(int).to_dict() if not df_konki.empty else {}
 
+    # ★ 74期・75期・76期・77期のCSV合計値マップも作成（表とPOPの完全一致用）
+    ki_qty_maps = {}
+    for ki_lbl in ["74期", "75期", "76期", "77期"]:
+        sub_k = df_all[df_all["ki"] == ki_lbl]
+        ki_qty_maps[ki_lbl] = sub_k.groupby("code_norm")["qty"].sum().round().astype(int).to_dict() if not sub_k.empty else {}
+
+    # ★ 上位50社で切らずに全社を出力（POP内の合計と表の数字が1個もズレないようにする）
     def make_rank_list(sub_df):
         if sub_df.empty:
             return []
@@ -866,7 +901,7 @@ def fetch_and_build_yayoi_sales_from_gdrive(up_sales_bytes, up_sales_name, targe
                 "伝票回数": int(r["cnt"]),
                 "最終売上日": str(r["last_date"] or "—")
             }
-            for _, r in c_grp.head(50).iterrows()
+            for _, r in c_grp.iterrows()
         ]
 
     comp_map = {}
@@ -891,7 +926,7 @@ def fetch_and_build_yayoi_sales_from_gdrive(up_sales_bytes, up_sales_name, targe
                 "金額": int(round(r["amount"])),
                 "担当者": str(r["staff"] or "")
             }
-            for _, r in grp_sorted.head(60).iterrows()
+            for _, r in grp_sorted.head(80).iterrows()
         ]
 
     stats_pack = {
@@ -899,6 +934,7 @@ def fetch_and_build_yayoi_sales_from_gdrive(up_sales_bytes, up_sales_name, targe
         "prev_w_qty": prev_w_qty_map,
         "konki_qty": konki_qty_map,
         "konki_amt": konki_amt_map,
+        "ki_qty_maps": ki_qty_maps,
         "this_w_label": this_w_label,
         "prev_w_label": prev_w_label
     }
@@ -1477,6 +1513,44 @@ prev_w_label = sales_stats.get("prev_w_label", "先週(前週7日)")
 df_main["今期出荷"] = df_main["品番_正規化"].map(konki_qty_map).fillna(0).astype(int)
 df_main["先週売数"] = df_main["品番_正規化"].map(prev_w_qty_map).fillna(0).astype(int)
 df_main["今週売数"] = df_main["品番_正規化"].map(this_w_qty_map).fillna(0).astype(int)
+
+# ★重要：77期〜74期も「表の数字」と「POP内訳の合計」が1個もズレないよう完全同期！
+ki_qty_maps = sales_stats.get("ki_qty_maps", {})
+for ki_col in ["77期", "76期", "75期", "74期"]:
+    k_map = ki_qty_maps.get(ki_col, {})
+    if not k_map:
+        continue
+    new_ki_vals = []
+    for _, r_row in df_main.iterrows():
+        cn = r_row["品番_正規化"]
+        excel_v = int(r_row[ki_col])
+        csv_v = int(k_map.get(cn, 0))
+        if ki_col == "77期" and csv_v > 0:
+            # 77期はExcel側が「7/24まで」を含んでズレているため、yayoi_CSVの正確な77期(7/1〜6/30)合計値に統一
+            new_ki_vals.append(csv_v)
+        elif csv_v > 0 and excel_v == 0:
+            new_ki_vals.append(csv_v)
+        else:
+            new_ki_vals.append(excel_v)
+            # 過去期(74〜76期)で当時のCSVが一部未格納でExcel記録の方が多い場合、POP内訳に差額分を自動補完して合計を完全一致させる
+            if excel_v > csv_v and csv_v > 0:
+                diff_q = excel_v - csv_v
+                if cn not in sales_comp_map:
+                    sales_comp_map[cn] = {}
+                cur_list = list(sales_comp_map[cn].get(ki_col, []))
+                cur_list.append({
+                    "得意先名": "📁（CSV保管前の過去出荷分 / Excel台帳記録分）",
+                    "数量": diff_q,
+                    "構成比": "—",
+                    "金額": 0,
+                    "伝票回数": 0,
+                    "最終売上日": "—"
+                })
+                # 構成比をExcel合計ベースで再計算
+                for item_c in cur_list:
+                    item_c["構成比"] = f"{round(item_c['数量'] / excel_v * 100, 1)}%"
+                sales_comp_map[cn][ki_col] = cur_list
+    df_main[ki_col] = new_ki_vals
 
 # 4. 『今期（26/7〜）の売上だけ』で今期売上高・今期粗利額・今期粗利率を算出（過去期は一切混ぜない）
 new_costs, min_gedais, avg_prices, sales_amts, gross_profits, margin_rates, stock_vals = [], [], [], [], [], [], []
