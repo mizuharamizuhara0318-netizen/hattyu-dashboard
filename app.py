@@ -1005,7 +1005,6 @@ def fetch_and_build_yayoi_sales_from_gdrive(up_sales_bytes, up_sales_name, targe
         "prev_w_qty": prev_w_qty_map,
         "konki_qty": konki_qty_map,
         "konki_amt": konki_amt_map,
-        "ki_qty_maps": ki_qty_maps,
         "this_w_label": this_w_label,
         "prev_w_label": prev_w_label
     }
