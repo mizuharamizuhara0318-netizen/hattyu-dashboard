@@ -21,11 +21,16 @@ st.set_page_config(page_title="発注検討表 ＆ 売上・粗利・在庫統�
 st.markdown("""
 <style>
     header[data-testid="stHeader"] {
-        height: 1.8rem !important;
+        height: 2.0rem !important;
         background: transparent !important;
+        pointer-events: none !important;
+    }
+    header[data-testid="stHeader"] button,
+    header[data-testid="stHeader"] a {
+        pointer-events: auto !important;
     }
     .block-container {
-        padding-top: 1.0rem !important;
+        padding-top: 2.2rem !important;
         padding-bottom: 1rem !important;
         padding-left: 0.8rem !important;
         padding-right: 0.8rem !important;
@@ -39,6 +44,17 @@ st.markdown("""
         margin-bottom: 6px;
         padding-bottom: 4px;
         border-bottom: 3px solid #2563eb;
+    }
+    div[data-testid="stButton"] > button {
+        width: 100% !important;
+        min-height: 44px !important;
+        cursor: pointer !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+    }
+    div[data-testid="stButton"] > button * {
+        pointer-events: none !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -399,11 +415,10 @@ def sync_all_files_from_gdrive(order_url: str, kakuho_url: str = "", master_r_ur
 # =========================================================
 # 『order_r（マスター）.xlsx』の「新原価」「item」シート読み込み処理
 # =========================================================
-@st.cache_data
+@st.cache_data(ttl=3600)
 def load_order_r_cost_master(file_source):
     """
-    order_r（マスター）.xlsx の『新原価』シートから最新の原価・最低下代を取得し、
-    『加盟店価格』『加盟店グループ管理』『注文者会社名』から会社ごとの販売価格（ロット単価）を取得する関数
+    order_r（マスター）.xlsx から『新原価』と『item』の2シートだけを高速読み込みする関数
     """
     raw_bytes = None
     used_label = ""
@@ -427,24 +442,18 @@ def load_order_r_cost_master(file_source):
                 used_label = f"ローカル: {os.path.basename(src)}"
                 break
 
-    cost_map = {}
-    gedai_map = {}
-    wh_type_map = {}
-    std_price_map = {}
-    r_name_map = {}
-    kamei_price_map = {}
+    cost_map, gedai_map, wh_type_map, std_price_map, r_name_map, kamei_price_map = {}, {}, {}, {}, {}, {}
 
     if raw_bytes is None:
         return cost_map, gedai_map, wh_type_map, std_price_map, r_name_map, kamei_price_map, "未検出"
 
     clean_io = fix_corrupted_xlsx_filters(raw_bytes)
     try:
-        xls = pd.ExcelFile(clean_io)
-        # 1. 『新原価』シートの読み取り（原価・最低下代の最優先マスター）
-        if "新原価" in xls.sheet_names:
-            df_sg = pd.read_excel(xls, sheet_name="新原価")
-            for _, r in df_sg.iterrows():
-                vals = r.values
+        wb = openpyxl.load_workbook(clean_io, read_only=True, data_only=True)
+        # 1. 『新原価』シートのみ高速読み取り
+        if "新原価" in wb.sheetnames:
+            ws_sg = wb["新原価"]
+            for vals in ws_sg.iter_rows(min_row=2, values_only=True):
                 if len(vals) >= 2 and clean_str(vals[0]):
                     c_n = normalize_code(vals[0])
                     c_val = to_num(vals[1])
@@ -457,89 +466,42 @@ def load_order_r_cost_master(file_source):
                         if 0 < g_val < 90000:
                             gedai_map[c_n] = g_val
 
-        # 2. 『item』シートの読み取り
-        if "item" in xls.sheet_names:
-            df_it = pd.read_excel(xls, sheet_name="item")
-            for _, r in df_it.iterrows():
-                c_raw = clean_str(r.get("商品番号", ""))
+        # 2. 『item』シートのみ高速読み取り
+        if "item" in wb.sheetnames:
+            ws_it = wb["item"]
+            rows_it = ws_it.iter_rows(values_only=True)
+            header_it = [clean_str(x) for x in next(rows_it, [])]
+            idx_no = header_it.index("商品番号") if "商品番号" in header_it else 1
+            idx_nm = header_it.index("商品名") if "商品名" in header_it else 5
+            idx_pr = header_it.index("販売価格") if "販売価格" in header_it else 8
+            idx_cs = header_it.index("原価") if "原価" in header_it else 16
+
+            for vals in rows_it:
+                if len(vals) <= idx_no:
+                    continue
+                c_raw = clean_str(vals[idx_no])
                 if not c_raw:
                     continue
                 c_n = normalize_code(c_raw)
-                p_val = to_num(r.get("販売価格", 0))
-                if 0 < p_val < 90000:
-                    std_price_map[c_n] = p_val
-                c_val = to_num(r.get("原価", 0))
-                if c_n not in cost_map and c_val > 0:
-                    cost_map[c_n] = c_val
-                nm = clean_str(r.get("商品名", ""))
-                if nm:
-                    nm_clean = re.sub(r'^.*?】', '', nm)
-                    nm_clean = re.sub(r'[\(（]\d{13}[\)）]$', '', nm_clean).strip()
-                    r_name_map[c_n] = nm_clean or nm
-
-        # 3. グループ番号・加盟店コードから会社名を引く辞書を作成
-        grp_to_comp = {"12": "【標準ランク】1.1倍", "13": "【標準ランク】1.15倍", "14": "【標準ランク】1.2倍", "15": "【標準ランク】1.25倍", "40": "【標準ランク】定価/上代"}
-        if "加盟店グループ管理" in xls.sheet_names:
-            df_gm = pd.read_excel(xls, sheet_name="加盟店グループ管理")
-            for _, r in df_gm.iterrows():
-                cnm = clean_str(r.get("加盟店名", ""))
-                if cnm:
-                    g_no = clean_str(r.get("グループ番号", "")).replace("_x000D_", "").strip()
-                    k_cd = clean_str(r.get("加盟店コード", "")).strip()
-                    if g_no:
-                        grp_to_comp[g_no] = cnm
-                    if k_cd:
-                        grp_to_comp[k_cd] = cnm
-
-        if "注文者会社名" in xls.sheet_names:
-            df_cm = pd.read_excel(xls, sheet_name="注文者会社名")
-            for _, r in df_cm.iterrows():
-                cnm = clean_str(r.get("加盟店名", ""))
-                if cnm:
-                    g_no = clean_str(r.get("グループ番号", "")).strip()
-                    k_cd = clean_str(r.get("加盟店コード", "")).strip()
-                    if g_no and g_no not in grp_to_comp:
-                        grp_to_comp[g_no] = cnm
-                    if k_cd and k_cd not in grp_to_comp:
-                        grp_to_comp[k_cd] = cnm
-
-        # 4. 『加盟店価格』シートから商品別・会社別の販売価格（ロット単価）を一括取得
-        if "加盟店価格" in xls.sheet_names:
-            df_kp = pd.read_excel(xls, sheet_name="加盟店価格")
-            for _, r in df_kp.iterrows():
-                p_raw = clean_str(r.get("商品番号", "")) or clean_str(r.get("商品管理番号", ""))
-                if not p_raw:
-                    continue
-                c_n = normalize_code(p_raw)
-                u_price = int(round(to_num(r.get("ロット単価", 0))))
-                if u_price <= 0 or u_price >= 90000:
-                    continue
-                lot_q = max(int(round(to_num(r.get("ロット数", 1)))), 1)
-                comp_nm = clean_str(r.get("会社名", ""))
-                g_seq = clean_str(r.get("グループ連番", ""))
-                if not comp_nm and g_seq:
-                    comp_nm = grp_to_comp.get(g_seq, f"グループ連番:{g_seq}")
-                if not comp_nm:
-                    continue
-
-                # 最低下代が新原価シートになければ加盟店価格シートの最低下代で補完
-                if c_n not in gedai_map:
-                    g_val = to_num(r.get("最低下代", 0))
-                    if 0 < g_val < 90000:
-                        gedai_map[c_n] = g_val
-
-                if c_n not in kamei_price_map:
-                    kamei_price_map[c_n] = []
-                kamei_price_map[c_n].append({
-                    "会社名": comp_nm,
-                    "グループ": g_seq,
-                    "ロット数": lot_q,
-                    "販売価格": u_price
-                })
+                if len(vals) > idx_pr:
+                    p_val = to_num(vals[idx_pr])
+                    if 0 < p_val < 90000:
+                        std_price_map[c_n] = p_val
+                if len(vals) > idx_cs and c_n not in cost_map:
+                    c_val = to_num(vals[idx_cs])
+                    if c_val > 0:
+                        cost_map[c_n] = c_val
+                if len(vals) > idx_nm:
+                    nm = clean_str(vals[idx_nm])
+                    if nm:
+                        nm_clean = re.sub(r'^.*?】', '', nm)
+                        nm_clean = re.sub(r'[\(（]\d{13}[\)）]$', '', nm_clean).strip()
+                        r_name_map[c_n] = nm_clean or nm
+        wb.close()
     except Exception:
         pass
 
-    return cost_map, gedai_map, wh_type_map, std_price_map, r_name_map, kamei_price_map, f"{used_label} (新原価 {len(cost_map):,}件 / 加盟店価格 {len(kamei_price_map):,}品番)"
+    return cost_map, gedai_map, wh_type_map, std_price_map, r_name_map, kamei_price_map, f"{used_label} (新原価 {len(cost_map):,}件)"
 
 # =========================================================
 # ロジザード在庫CSV（名古屋・青山）の直接読み込み補完処理
@@ -823,7 +785,7 @@ def fetch_and_build_yayoi_sales_from_gdrive(up_sales_bytes, up_sales_name, targe
             except Exception:
                 pass
 
-    # 2. Google Drive APIから全サブフォルダ（2022年〜2026年 > 1月〜12月）のyayoi_CSVを検索
+    # 2. Google Drive APIから「今期（2026年7月1日以降）」のyayoi_CSVだけを高速検索・取得
     creds_info = get_gdrive_creds_info()
     csv_file_metas = []
 
@@ -834,13 +796,13 @@ def fetch_and_build_yayoi_sales_from_gdrive(up_sales_bytes, up_sales_name, targe
             creds = service_account.Credentials.from_service_account_info(
                 creds_info, scopes=["https://www.googleapis.com/auth/drive.readonly"]
             )
-            service = build("drive", "v3", credentials=creds)
+            service = build("drive", "v3", credentials=creds, cache_discovery=False)
 
-            # フォルダIDとフォルダ名（2025年、12月など）の対応表を取得して親フォルダから年を特定できるようにする
+            # フォルダ名を取得（2022年〜2025年など過去年フォルダを即除外するため）
             folder_map = {}
             f_res = service.files().list(
                 q="trashed = false and mimeType = 'application/vnd.google-apps.folder'",
-                pageSize=500,
+                pageSize=200,
                 fields="files(id, name, parents)",
                 supportsAllDrives=True,
                 includeItemsFromAllDrives=True
@@ -852,7 +814,7 @@ def fetch_and_build_yayoi_sales_from_gdrive(up_sales_bytes, up_sales_name, targe
                 parts = []
                 cur_ids = list(parent_ids or [])
                 depth = 0
-                while cur_ids and depth < 4:
+                while cur_ids and depth < 3:
                     pid = cur_ids[0]
                     if pid in folder_map:
                         fnm, p_parents = folder_map[pid]
@@ -863,28 +825,40 @@ def fetch_and_build_yayoi_sales_from_gdrive(up_sales_bytes, up_sales_name, targe
                     depth += 1
                 return "/".join(reversed(parts))
 
+            # ★ 今期（2026年7月1日以降）に更新されたyayoi_CSVだけに絞って検索（最大200件）
             page_token = None
-            q = "trashed = false and (name contains 'yayoi_' or name contains '弥生' or name contains '売上') and (mimeType contains 'csv' or name contains '.csv')"
+            q = (
+                "trashed = false and modifiedTime >= '2026-07-01T00:00:00' and "
+                "(name contains 'yayoi_' or name contains '売上') and "
+                "(mimeType contains 'csv' or name contains '.csv')"
+            )
             while True:
                 res = service.files().list(
                     q=q,
-                    pageSize=250,
+                    pageSize=200,
                     pageToken=page_token,
-                    fields="nextPageToken, files(id, name, parents, modifiedTime, size)",
+                    fields="nextPageToken, files(id, name, parents, modifiedTime)",
                     orderBy="modifiedTime desc",
                     supportsAllDrives=True,
                     includeItemsFromAllDrives=True
                 ).execute()
-                batch_files = res.get("files", [])
-                for f in batch_files:
+                for f in res.get("files", []):
                     fn = f.get("name", "")
                     mt = f.get("modifiedTime", "")
+                    if not fn.lower().endswith(".csv") or fn.startswith("~$"):
+                        continue
                     p_str = get_folder_path_str(f.get("parents", []))
+                    # 2022年〜2025年の過去フォルダに入っているファイルはダウンロードしない
+                    if any(old_y in p_str for old_y in ["2022年", "2023年", "2024年", "2025年"]):
+                        continue
+                    # 2026年フォルダでも1月〜6月（前期77期）のファイルは除外
+                    m_md = re.search(r'yayoi_(\d{2})(\d{2})', fn.lower())
+                    if m_md and int(m_md.group(1)) <= 6:
+                        continue
                     full_virtual_name = f"{p_str}/{fn}" if p_str else fn
-                    if fn.lower().endswith(".csv") and not fn.startswith("~$"):
-                        csv_file_metas.append((f["id"], full_virtual_name, mt))
+                    csv_file_metas.append((f["id"], full_virtual_name, mt))
                 page_token = res.get("nextPageToken")
-                if not page_token or len(csv_file_metas) >= 1500:
+                if not page_token or len(csv_file_metas) >= 200:
                     break
         except Exception:
             pass
@@ -892,14 +866,15 @@ def fetch_and_build_yayoi_sales_from_gdrive(up_sales_bytes, up_sales_name, targe
     if csv_file_metas and creds_info is not None:
         from google.oauth2 import service_account
         from googleapiclient.discovery import build
+        # 認証オブジェクトは外で1回だけ生成して使い回す
+        shared_creds = service_account.Credentials.from_service_account_info(
+            creds_info, scopes=["https://www.googleapis.com/auth/drive.readonly"]
+        )
 
         def dl_and_parse_worker(meta_item):
             fid, fname_with_path, mtime_str = meta_item
             try:
-                c_obj = service_account.Credentials.from_service_account_info(
-                    creds_info, scopes=["https://www.googleapis.com/auth/drive.readonly"]
-                )
-                srv = build("drive", "v3", credentials=c_obj, cache_discovery=False)
+                srv = build("drive", "v3", credentials=shared_creds, cache_discovery=False)
                 raw_b = srv.files().get_media(fileId=fid, supportsAllDrives=True).execute()
                 if raw_b:
                     df_p = parse_yayoi_sales_csv(fname_with_path, raw_b, mtime_str)
@@ -909,7 +884,7 @@ def fetch_and_build_yayoi_sales_from_gdrive(up_sales_bytes, up_sales_name, targe
                 pass
             return pd.DataFrame()
 
-        with ThreadPoolExecutor(max_workers=12) as executor:
+        with ThreadPoolExecutor(max_workers=10) as executor:
             futures = [executor.submit(dl_and_parse_worker, m_item) for m_item in csv_file_metas]
             for fut in as_completed(futures):
                 df_res = fut.result()
@@ -1083,17 +1058,23 @@ def load_excel_master(file_source):
     clean_io = fix_corrupted_xlsx_filters(raw_bytes)
     all_sheets = {}
     try:
-        all_sheets = pd.read_excel(clean_io, sheet_name=None, header=None)
-    except Exception:
-        try:
-            clean_io.seek(0)
-            wb = openpyxl.load_workbook(clean_io, read_only=True, data_only=True)
-            for sname in wb.sheetnames:
-                ws = wb[sname]
-                all_sheets[sname] = pd.DataFrame(list(ws.iter_rows(values_only=True)))
-        except Exception as ex:
-            st.error(f"発注検討表の読み込みエラー: {ex}")
-            return pd.DataFrame(), pd.DataFrame(), "前回決定事項", {}, "", {}
+        wb = openpyxl.load_workbook(clean_io, read_only=True, data_only=True)
+        # 必要なシート名だけを抽出（過去の古い会議シートや大量のtotalシートは読まない）
+        req_keywords = ["マスター (新) (3)", "在庫貼り付け", "入荷予定貼り付け", "確保貼り付け", "商品一覧表 (3)"]
+        digit_sheets = [s for s in wb.sheetnames if str(s).strip().isdigit() and len(str(s).strip()) == 5]
+        # 会議履歴は直近5シート分だけ読み込む
+        target_names = [s for s in wb.sheetnames if any(k == str(s) for k in req_keywords)]
+        if not any("マスター" in s for s in target_names):
+            target_names.append(wb.sheetnames[0])
+        target_names.extend(digit_sheets[-5:])
+
+        for sname in dict.fromkeys(target_names):
+            ws = wb[sname]
+            all_sheets[sname] = pd.DataFrame(list(ws.iter_rows(values_only=True)))
+        wb.close()
+    except Exception as ex:
+        st.error(f"発注検討表の読み込みエラー: {ex}")
+        return pd.DataFrame(), pd.DataFrame(), "前回決定事項", {}, "", {}
 
     target_sheet_name = list(all_sheets.keys())[0]
     if "マスター (新) (3)" in all_sheets:
